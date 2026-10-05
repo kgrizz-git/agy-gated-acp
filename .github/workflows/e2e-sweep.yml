@@ -6,7 +6,9 @@
 # concurrency group in e2e.yml.
 #
 # GITHUB_TOKEN with actions: write can cancel a waiting run; it cannot reject
-# the pending deployment, which needs a required reviewer.
+# the pending deployment, which needs a required reviewer. GitHub disables
+# scheduled workflows after 60 days without repository activity; re-enable this
+# one if that happens.
 name: e2e-sweep
 
 on:
@@ -40,12 +42,12 @@ jobs:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           ids=$(gh run list --workflow e2e.yml --branch "$HEAD_REF" \
-            --status waiting --limit 100 --json databaseId --jq '.[].databaseId')
+            --event pull_request --status waiting --limit 100 --json databaseId --jq '.[].databaseId')
           for id in $ids; do
             echo "cancelling e2e run $id (PR closed)"
-            gh run cancel "$id"
+            gh run cancel "$id" || echo "could not cancel $id (finished or approved meanwhile?)"
           done
-          echo "cancelled $(printf '%s\n' "$ids" | grep -c . || true) run(s)"
+          echo "found $(printf '%s\n' "$ids" | grep -c . || true) waiting run(s)"
 
       - name: Cancel e2e runs waiting longer than MAX_WAIT_DAYS
         if: github.event_name != 'pull_request'
@@ -56,6 +58,6 @@ jobs:
             --jq ".[] | select((.createdAt | fromdateiso8601) < $cutoff) | .databaseId")
           for id in $ids; do
             echo "cancelling e2e run $id (waiting > ${MAX_WAIT_DAYS}d)"
-            gh run cancel "$id"
+            gh run cancel "$id" || echo "could not cancel $id (finished or approved meanwhile?)"
           done
-          echo "cancelled $(printf '%s\n' "$ids" | grep -c . || true) run(s)"
+          echo "found $(printf '%s\n' "$ids" | grep -c . || true) waiting run(s)"
