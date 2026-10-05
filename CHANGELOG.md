@@ -12,8 +12,8 @@ versioned delivery as `0.2.0`; everything under that heading shipped together.
 
 ### Maintenance
 
-- A newer push to a PR cancels its older e2e run, even one still waiting on approval.
-- `e2e-sweep` workflow cancels e2e runs waiting on approval after 3 days or once their PR closes.
+- A newer push to a PR cancels its older e2e run, even one still waiting on approval. (PR #27)
+- `e2e-sweep` workflow cancels e2e runs waiting on approval after 3 days or once their PR closes. (PR #27)
 
 ## 0.3.0
 
