@@ -52,6 +52,11 @@ document. Delete an entry when it lands, rather than checking it off.
   Plan: [plans/fork-maintenance.md](plans/fork-maintenance.md).
 - Evaluate ACP configuration, per-session workspace roots, and upstream changes
   only with an explicit compatibility plan. Plan: [plans/ecosystem-followups.md](plans/ecosystem-followups.md).
+- Widen the e2e model roster beyond `gemini-*-flash-low` if the CI key can call
+  more distinct base models (e.g. GPT-OSS 120B, Claude Sonnet 4.6, Flash Lite);
+  thinking-level variants share their base model's quota and add no headroom.
+  Next: with the CI key and pinned agy, capture `agy models` and try one turn on
+  each non-flash row. Reference: [quota rotation](plans/completed/e2e-quota-rotation.md).
 
 ## Icebox
 
