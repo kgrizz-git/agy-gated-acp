@@ -44,12 +44,16 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         # Branch and event alone would also match a later PR that reuses this
         # branch, so a run is only cancelled when its head commit belongs to
-        # the closed PR. --paginate walks every page; nothing is capped.
+        # the closed PR and it is not associated only with some other PR (a
+        # replacement opened on the same head). --paginate walks every page.
         run: |
           shas=$(gh api --paginate "repos/$GH_REPO/pulls/$PR_NUMBER/commits" --jq '.[].sha')
           runs=$(gh api --paginate -X GET "repos/$GH_REPO/actions/workflows/e2e.yml/runs" \
             -f branch="$HEAD_REF" -f event=pull_request -f status=waiting -f per_page=100 \
-            --jq '.workflow_runs[] | "\(.id) \(.head_sha)"')
+            --jq '.workflow_runs[]
+              | select((.pull_requests | length) == 0
+                       or any(.pull_requests[]; .number == (env.PR_NUMBER | tonumber)))
+              | "\(.id) \(.head_sha)"')
           ids=$(printf '%s\n' "$runs" | while read -r id sha; do
             [ -n "$id" ] && printf '%s\n' "$shas" | grep -Fxq "$sha" && echo "$id"
           done || true)

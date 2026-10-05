@@ -170,10 +170,12 @@ must identify the software that was installed. The first versioned delivery was
      no-tool turn, base-model metering, no wider ceiling observed at ~30 project
      requests — see plans/completed/e2e-quota-rotation.md). Unset locally,
      tests fall through to the `settings.json` default. `error_paths` does not
-     call the model. A failed turn retries twice, after 30s then 60s, failing
-     over to the next roster model first: the first backoff absorbs short 503
-     capacity spikes and the second exceeds the observed ~37s per-minute-429
-     retryDelay; daily 429s fail again fast, with a hint pointing at the agy log.
+     call the model. A failed turn retries three times, after 30s, 60s, then
+     5 min, failing over to the next roster model first: the first backoff
+     absorbs short 503 capacity spikes, the second exceeds the observed ~37s
+     per-minute-429 retryDelay, and the third outlasts a high-demand 503 that
+     hit every roster model; daily 429s fail again fast, with a hint pointing
+     at the agy log.
    - Local runs: `scripts/e2e-local.sh [filter] [args...]` sources the token
      from `.env.e2e.local` (gitignored) and runs everything under a throwaway
      `HOME`, so the real `~/.gemini` state (OAuth login, settings, session

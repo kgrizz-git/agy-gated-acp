@@ -396,13 +396,15 @@ fn send_recv_id(
     }
 }
 
-/// Attempts for one model turn: the first try plus two bounded retries.
-const TURN_ATTEMPTS: u32 = 3;
+/// Attempts for one model turn: the first try plus three bounded retries.
+const TURN_ATTEMPTS: u32 = 4;
 const _: () = assert!(TURN_ATTEMPTS >= 1);
 
 /// Delays before resending a failed turn. The first catches brief 503 capacity
-/// spikes; the second exceeds the observed per-minute 429 `retryDelay ~37s`.
-const TURN_RETRY_DELAYS_SECS: [u64; 2] = [30, 60];
+/// spikes; the second exceeds the observed per-minute 429 `retryDelay ~37s`;
+/// the third outlasts a high-demand 503 that persisted across every roster
+/// model through the first two.
+const TURN_RETRY_DELAYS_SECS: [u64; 3] = [30, 60, 300];
 const _: () = assert!(TURN_RETRY_DELAYS_SECS.len() == (TURN_ATTEMPTS - 1) as usize);
 
 /// Returns the delay for a valid retry count, never panicking on a bad caller.
@@ -422,12 +424,14 @@ fn retry_number(attempts_left: u32) -> Option<usize> {
 
 #[test]
 fn retry_delays_back_off_without_exceeding_the_e2e_budget() {
-    assert_eq!(retry_delay_secs(2), Some(30));
-    assert_eq!(retry_delay_secs(1), Some(60));
+    assert_eq!(retry_delay_secs(3), Some(30));
+    assert_eq!(retry_delay_secs(2), Some(60));
+    assert_eq!(retry_delay_secs(1), Some(300));
     assert_eq!(retry_delay_secs(0), None);
     assert_eq!(retry_delay_secs(TURN_ATTEMPTS), None);
-    assert_eq!(retry_number(2), Some(1));
-    assert_eq!(retry_number(1), Some(2));
+    assert_eq!(retry_number(3), Some(1));
+    assert_eq!(retry_number(2), Some(2));
+    assert_eq!(retry_number(1), Some(3));
     assert_eq!(retry_number(0), None);
     assert_eq!(retry_number(TURN_ATTEMPTS), None);
 }
@@ -442,7 +446,7 @@ fn retry_delays_back_off_without_exceeding_the_e2e_budget() {
 /// entirely, so matching "429"/"503" would miss transient phrasings while
 /// coupling us to agy stderr wording. Refusals are not errors here
 /// (`stopReason: "refusal"`), and malformed/session/auth failures cannot occur
-/// past the harness gates — so the only cost of a needless retry is at most 90s
+/// past the harness gates — so the only cost of a needless retry is at most 390s
 /// of backoff on an already-failed run.
 fn await_turn_retry(err: &Value, attempts_left: u32) -> bool {
     use std::time::Duration;
