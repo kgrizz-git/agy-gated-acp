@@ -191,7 +191,10 @@ CI (`ci.yml`) enforces `cargo build`, unit tests, the ignored I/O tier
 Rust 1.70 is the tested MSRV on Linux and Windows. The Unix-socket `--permission-prompts` bridge is intentionally
 unavailable on Windows and fails closed there. E2e (`e2e.yml`) runs only after
 approval of the protected `e2e` GitHub environment for same-repository PRs;
-fork PRs skip before requesting approval. The environment holds
+fork PRs skip before requesting approval. A newer push to the same PR cancels the older run
+(`concurrency`), and `e2e-sweep.yml` cancels runs still waiting on approval
+after 3 days or when their PR closes, so they end cancelled rather than failing
+at GitHub's 30-day approval limit. The environment holds
 `E2E_GEMINI_API_KEY`, and the workflow uses a pinned agy release. Do not use a
 repository-level e2e key: the workflow checks out PR code.
 

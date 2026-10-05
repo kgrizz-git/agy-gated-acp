@@ -10,6 +10,12 @@ versioned delivery as `0.2.0`; everything under that heading shipped together.
 
 ## Unreleased
 
+### Maintenance
+
+- Unapproved e2e runs no longer sit 30 days and then fail: a newer push to
+  the PR cancels the older run, and a daily `e2e-sweep` workflow cancels runs
+  still waiting on approval after 3 days or once their PR closes.
+
 ## 0.3.0
 
 ### Changed

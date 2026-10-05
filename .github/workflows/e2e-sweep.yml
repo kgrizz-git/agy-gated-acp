@@ -1,0 +1,61 @@
+# Cancels e2e runs left waiting on environment approval. GitHub holds an
+# unapproved deployment for 30 days and then fails the run, which emails a
+# failure for a run nobody meant to approve. Cancelling instead records it as
+# cancelled: on a closed PR straight away, and otherwise once it has waited
+# longer than MAX_WAIT_DAYS. Superseded pushes are already handled by the
+# concurrency group in e2e.yml.
+#
+# GITHUB_TOKEN with actions: write can cancel a waiting run; it cannot reject
+# the pending deployment, which needs a required reviewer.
+name: e2e-sweep
+
+on:
+  schedule:
+    # Daily, 06:17 UTC.
+    - cron: "17 6 * * *"
+  pull_request:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  sweep:
+    # A fork PR's token is read-only, and e2e.yml skips fork PRs before they
+    # ever wait, so there is nothing to cancel for them.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      MAX_WAIT_DAYS: 3
+    steps:
+      - name: Cancel waiting e2e runs on the closed PR
+        if: github.event_name == 'pull_request'
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          ids=$(gh run list --workflow e2e.yml --branch "$HEAD_REF" \
+            --status waiting --limit 100 --json databaseId --jq '.[].databaseId')
+          for id in $ids; do
+            echo "cancelling e2e run $id (PR closed)"
+            gh run cancel "$id"
+          done
+          echo "cancelled $(printf '%s\n' "$ids" | grep -c . || true) run(s)"
+
+      - name: Cancel e2e runs waiting longer than MAX_WAIT_DAYS
+        if: github.event_name != 'pull_request'
+        run: |
+          cutoff=$(( $(date -u +%s) - MAX_WAIT_DAYS * 86400 ))
+          ids=$(gh run list --workflow e2e.yml --status waiting --limit 200 \
+            --json databaseId,createdAt \
+            --jq ".[] | select((.createdAt | fromdateiso8601) < $cutoff) | .databaseId")
+          for id in $ids; do
+            echo "cancelling e2e run $id (waiting > ${MAX_WAIT_DAYS}d)"
+            gh run cancel "$id"
+          done
+          echo "cancelled $(printf '%s\n' "$ids" | grep -c . || true) run(s)"

@@ -12,6 +12,15 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same PR cancels the older run, whether it is running or
+# still waiting on environment approval -- a superseded commit's e2e is not
+# worth the quota or the approval. GitHub otherwise keeps an unapproved run
+# waiting for 30 days and then reports it failed; e2e-sweep.yml cancels the
+# ones no push supersedes. Dispatches are keyed by run, so none cancels another.
+concurrency:
+  group: e2e-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   e2e:
     # Fork PRs cannot receive Actions secrets, so skip before requesting the
