@@ -22,6 +22,7 @@ on:
 
 permissions:
   actions: write
+  pull-requests: read
 
 jobs:
   sweep:
@@ -40,22 +41,34 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        # Branch and event alone would also match a later PR that reuses this
+        # branch, so a run is only cancelled when its head commit belongs to
+        # the closed PR. --paginate walks every page; nothing is capped.
         run: |
-          ids=$(gh run list --workflow e2e.yml --branch "$HEAD_REF" \
-            --event pull_request --status waiting --limit 100 --json databaseId --jq '.[].databaseId')
+          shas=$(gh api --paginate "repos/$GH_REPO/pulls/$PR_NUMBER/commits" --jq '.[].sha')
+          runs=$(gh api --paginate -X GET "repos/$GH_REPO/actions/workflows/e2e.yml/runs" \
+            -f branch="$HEAD_REF" -f event=pull_request -f status=waiting -f per_page=100 \
+            --jq '.workflow_runs[] | "\(.id) \(.head_sha)"')
+          ids=$(printf '%s\n' "$runs" | while read -r id sha; do
+            [ -n "$id" ] && printf '%s\n' "$shas" | grep -Fxq "$sha" && echo "$id"
+          done || true)
           for id in $ids; do
-            echo "cancelling e2e run $id (PR closed)"
+            echo "cancelling e2e run $id (PR #$PR_NUMBER closed)"
             gh run cancel "$id" || echo "could not cancel $id (finished or approved meanwhile?)"
           done
           echo "found $(printf '%s\n' "$ids" | grep -c . || true) waiting run(s)"
 
       - name: Cancel e2e runs waiting longer than MAX_WAIT_DAYS
         if: github.event_name != 'pull_request'
+        # The age cutoff is applied server-side, so every page holds only runs
+        # to cancel and --paginate reaches all of them; the jq check repeats it.
         run: |
           cutoff=$(( $(date -u +%s) - MAX_WAIT_DAYS * 86400 ))
-          ids=$(gh run list --workflow e2e.yml --status waiting --limit 200 \
-            --json databaseId,createdAt \
-            --jq ".[] | select((.createdAt | fromdateiso8601) < $cutoff) | .databaseId")
+          cutoff_iso=$(date -u -d "@$cutoff" +%Y-%m-%dT%H:%M:%SZ)
+          ids=$(gh api --paginate -X GET "repos/$GH_REPO/actions/workflows/e2e.yml/runs" \
+            -f status=waiting -f created="<$cutoff_iso" -f per_page=100 \
+            --jq ".workflow_runs[] | select((.created_at | fromdateiso8601) < $cutoff) | .id")
           for id in $ids; do
             echo "cancelling e2e run $id (waiting > ${MAX_WAIT_DAYS}d)"
             gh run cancel "$id" || echo "could not cancel $id (finished or approved meanwhile?)"
