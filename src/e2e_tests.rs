@@ -124,14 +124,6 @@ fn retry_model_from(
     pick_model_from(roster, offset, test_index + retry_number, None)
 }
 
-/// [`retry_model_from`] for this process: the roster from the environment and
-/// the model the failed turn ran on.
-fn retry_model(test_index: usize, retry_number: usize) -> Option<String> {
-    let (roster, offset) = roster_env();
-    let failed = lock_model(&CURRENT_MODEL).clone();
-    retry_model_from(&roster, offset, test_index, retry_number, failed.as_deref())
-}
-
 /// Record the outcome of a turn on the current model: success makes it the
 /// preferred start for later tests; failure stops preferring it.
 fn record_turn_outcome(succeeded: bool) {
@@ -417,9 +409,10 @@ fn maybe_set_model(
     }
 }
 
-/// Switch a retried prompt to the next configured roster member. A missing or
-/// rejected retry assignment is only diagnostic: the prompt still retries on
-/// the current model, preserving the original failure in the test output.
+/// Switch a retried prompt to the next roster model after the one that failed,
+/// skipping any candidate that `session/set_model` rejects. If every candidate
+/// is rejected (or there is no roster), the prompt retries on the current
+/// model, preserving the original failure in the test output.
 fn switch_to_retry_model(
     stdin: &mut std::process::ChildStdin,
     reader: &mut std::io::BufReader<std::process::ChildStdout>,
@@ -428,26 +421,46 @@ fn switch_to_retry_model(
     retry_number: usize,
     prompt_id: u64,
 ) {
-    let Some(slug) = retry_model(test_index, retry_number) else {
+    let (roster, offset) = roster_env();
+    let roster_len = parse_roster(&roster).len();
+    if roster_len == 0 {
         eprintln!("[e2e] retry model: (settings.json default; no E2E_MODEL_ROSTER)");
         return;
-    };
-    eprintln!("[e2e] retry model: {slug}");
-    // Room for 1000 attempts per prompt id, far above any roster's two sweeps.
-    let rpc_id = 10_000 + prompt_id * 1_000 + retry_number as u64;
-    let response = send_recv_id(
-        stdin,
-        reader,
-        rpc_id,
-        &set_model_rpc(rpc_id, session_id, &slug),
-    );
-    if response["error"].is_null() {
-        *lock_model(&CURRENT_MODEL) = Some(slug);
-    } else {
+    }
+    // Step past the model that just failed and, if set_model rejects a
+    // candidate, past that one too, so a rejected slug is not picked again on
+    // every later retry while the rest of the roster goes untried.
+    let mut skip_from = lock_model(&CURRENT_MODEL).clone();
+    for try_number in 0..roster_len {
+        let Some(slug) = retry_model_from(
+            &roster,
+            offset,
+            test_index,
+            retry_number,
+            skip_from.as_deref(),
+        ) else {
+            return;
+        };
+        eprintln!("[e2e] retry model: {slug}");
+        // Unique per prompt, retry and candidate: retries and candidates are
+        // each bounded by twice the roster length, far below these strides.
+        let rpc_id =
+            10_000_000 + prompt_id * 1_000_000 + retry_number as u64 * 1_000 + try_number as u64;
+        let response = send_recv_id(
+            stdin,
+            reader,
+            rpc_id,
+            &set_model_rpc(rpc_id, session_id, &slug),
+        );
+        if response["error"].is_null() {
+            *lock_model(&CURRENT_MODEL) = Some(slug);
+            return;
+        }
         eprintln!(
             "[e2e] retry model switch failed for {slug}: {}",
             response["error"]
         );
+        skip_from = Some(slug);
     }
 }
 
