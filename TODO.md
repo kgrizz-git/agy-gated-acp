@@ -57,6 +57,11 @@ document. Delete an entry when it lands, rather than checking it off.
   thinking-level variants share their base model's quota and add no headroom.
   Next: with the CI key and pinned agy, capture `agy models` and try one turn on
   each non-flash row. Reference: [quota rotation](plans/completed/e2e-quota-rotation.md).
+- Make the e2e agy pin real and current: CI installs CLI 1.1.26, but its log
+  reports the language server it runs as the latest release (1.2.17 on
+  2026-10-05, 1.3.0 on 2026-10-06), and agy ≥1.2.12 stops retrying on a daily
+  or billing quota cap instead of burning requests. Next: find agy's
+  auto-update switch, then bump the pin and its SHA-256 in `e2e.yml`.
 
 ## Icebox
 
