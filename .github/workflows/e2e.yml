@@ -31,9 +31,11 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     environment: e2e
-    # Two model-issuing tests can each spend 6.5 min in turn-retry backoff
-    # (30s + 60s + 5 min) on top of the build.
-    timeout-minutes: 30
+    # Worst case per model-issuing test: four turns that each run to the
+    # 330s turn deadline plus 6.5 min of backoff (30s + 60s + 5 min), about
+    # 28.5 min; two such tests plus the build fit in an hour. Normal runs take
+    # a few minutes.
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:

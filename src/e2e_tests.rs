@@ -400,6 +400,12 @@ fn send_recv_id(
 const TURN_ATTEMPTS: u32 = 4;
 const _: () = assert!(TURN_ATTEMPTS >= 1);
 
+/// How long one model turn may take before the harness gives up on it. agy
+/// retries a 503 internally and stays silent until its print-mode timeout (5
+/// min by default) ends the turn, so a shorter deadline turns agy's own error
+/// into a bare "Timed out". Keep this above that timeout.
+const TURN_DEADLINE_SECS: u64 = 330;
+
 /// Delays before resending a failed turn. The first catches brief 503 capacity
 /// spikes; the second exceeds the observed per-minute 429 `retryDelay ~37s`;
 /// the third outlasts a high-demand 503 that persisted across every roster
@@ -486,14 +492,14 @@ fn send_prompt_wait(
         writeln!(stdin, "{}", msg).unwrap();
         stdin.flush().unwrap();
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        let deadline = std::time::Instant::now() + Duration::from_secs(TURN_DEADLINE_SECS);
         // Accumulated, not overwritten: the answer arrives as deltas, and the
         // last one is often just a newline. Overwriting would make assertions
         // depend on how the model happened to chunk its reply.
         let mut notification_text: Option<String> = None;
         let resp = loop {
             if std::time::Instant::now() > deadline {
-                panic!("Timed out");
+                panic!("Timed out after {TURN_DEADLINE_SECS}s waiting for the turn");
             }
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();

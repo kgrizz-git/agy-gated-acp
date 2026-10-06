@@ -175,7 +175,9 @@ must identify the software that was installed. The first versioned delivery was
      absorbs short 503 capacity spikes, the second exceeds the observed ~37s
      per-minute-429 retryDelay, and the third outlasts a high-demand 503 that
      hit every roster model; daily 429s fail again fast, with a hint pointing
-     at the agy log.
+     at the agy log. Each turn may run 330s, just above agy's 5-minute
+     print-mode timeout, so a turn agy is still retrying internally ends with
+     agy's own error rather than a harness timeout.
    - Local runs: `scripts/e2e-local.sh [filter] [args...]` sources the token
      from `.env.e2e.local` (gitignored) and runs everything under a throwaway
      `HOME`, so the real `~/.gemini` state (OAuth login, settings, session
