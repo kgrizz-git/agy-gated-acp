@@ -161,8 +161,8 @@ must identify the software that was installed. The first versioned delivery was
    - `agy` in `PATH` (install from `google-antigravity/antigravity-cli` releases)
    - Auth via `GEMINI_API_KEY` env var or macOS Keychain (`~/.gemini/antigravity-cli/settings.json`)
    - `cargo build --release` must have been run first
-   - In CI, `E2E_MODEL_ROSTER` (comma-separated `gemini-*-flash-low` slugs, or
-     `gemini-*-flash-lite` ones if agy lists no flash-low model) and
+   - In CI, `E2E_MODEL_ROSTER` (comma-separated `gemini-*-flash-low` and
+     `gemini-*-flash-lite` slugs, whichever agy lists) and
      `E2E_MODEL_OFFSET` (`github.run_number`) rotate model-issuing tests via
      `session/set_model`; with at least two roster entries, those tests use
      different models in a run and a failed turn advances to the next entry
