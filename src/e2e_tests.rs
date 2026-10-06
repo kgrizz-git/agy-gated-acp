@@ -23,11 +23,13 @@ static LAST_GOOD_MODEL: Mutex<Option<String>> = Mutex::new(None);
 /// The model the current turn runs on, as last applied via `session/set_model`.
 static CURRENT_MODEL: Mutex<Option<String>> = Mutex::new(None);
 
+/// Lock one of the model cells, recovering from poisoning.
 fn lock_model(cell: &Mutex<Option<String>>) -> std::sync::MutexGuard<'_, Option<String>> {
     // A panicking test poisons the lock; the value is still a plain slug.
     cell.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Split a comma-separated roster into trimmed, non-empty slugs.
 fn parse_roster(roster: &str) -> Vec<&str> {
     roster
         .split(',')
@@ -36,6 +38,8 @@ fn parse_roster(roster: &str) -> Vec<&str> {
         .collect()
 }
 
+/// `E2E_MODEL_ROSTER` and `E2E_MODEL_OFFSET` from the environment, with an
+/// empty roster and offset 0 when unset.
 fn roster_env() -> (String, usize) {
     let roster = std::env::var("E2E_MODEL_ROSTER").unwrap_or_default();
     let offset = std::env::var("E2E_MODEL_OFFSET")
@@ -120,6 +124,8 @@ fn retry_model_from(
     pick_model_from(roster, offset, test_index + retry_number, None)
 }
 
+/// [`retry_model_from`] for this process: the roster from the environment and
+/// the model the failed turn ran on.
 fn retry_model(test_index: usize, retry_number: usize) -> Option<String> {
     let (roster, offset) = roster_env();
     let failed = lock_model(&CURRENT_MODEL).clone();
@@ -521,6 +527,8 @@ fn retry_delay_secs(attempts_left: u32) -> Option<u64> {
     TURN_RETRY_DELAYS_SECS.get(retry_index).copied()
 }
 
+/// Which retry (1-based) a turn with `attempts_left` is about to make, or
+/// `None` when no retry remains.
 fn retry_number(attempts_left: u32) -> Option<usize> {
     (1..TURN_ATTEMPTS)
         .contains(&attempts_left)
@@ -569,6 +577,9 @@ fn await_turn_retry(err: &Value, attempts_left: u32) -> bool {
     true
 }
 
+/// Send a `session/prompt` and wait for its response, collecting the agent's
+/// answer text. A failed turn is retried up to `TURN_ATTEMPTS` times, switching
+/// model before each retry; every outcome updates the preferred model.
 fn send_prompt_wait(
     stdin: &mut std::process::ChildStdin,
     reader: &mut std::io::BufReader<std::process::ChildStdout>,
