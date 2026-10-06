@@ -4,11 +4,50 @@
 //! Model-issuing tests pick a slug from `E2E_MODEL_ROSTER` via
 //! `session/set_model` so consecutive runs spread the free-tier daily
 //! per-model quota. Retries advance through that same roster to avoid waiting
-//! on one temporarily unavailable model; an empty roster falls through to the
-//! `settings.json` default. `session_load` also asserts conversation memory,
+//! on one temporarily unavailable model, and once a model answers, later tests
+//! start on it; an empty roster falls through to the `settings.json` default. `session_load` also asserts conversation memory,
 //! so there is no separate multi-turn test.
 
 use serde_json::{json, Value};
+use std::sync::Mutex;
+
+/// The roster model that most recently answered a turn in this process. CI
+/// runs these tests serially (`--test-threads=1`) in one process, so a later
+/// test can start on a model already shown to be serving instead of its
+/// rotation slot. During a capacity outage some models refuse every request
+/// while others answer, and this finds a working one without spending
+/// requests on probes: only the first test pays for the search. A model that
+/// fails is no longer preferred.
+static LAST_GOOD_MODEL: Mutex<Option<String>> = Mutex::new(None);
+
+/// The model the current turn runs on, as last applied via `session/set_model`.
+static CURRENT_MODEL: Mutex<Option<String>> = Mutex::new(None);
+
+/// Lock one of the model cells, recovering from poisoning.
+fn lock_model(cell: &Mutex<Option<String>>) -> std::sync::MutexGuard<'_, Option<String>> {
+    // A panicking test poisons the lock; the value is still a plain slug.
+    cell.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Split a comma-separated roster into trimmed, non-empty slugs.
+fn parse_roster(roster: &str) -> Vec<&str> {
+    roster
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// `E2E_MODEL_ROSTER` and `E2E_MODEL_OFFSET` from the environment, with an
+/// empty roster and offset 0 when unset.
+fn roster_env() -> (String, usize) {
+    let roster = std::env::var("E2E_MODEL_ROSTER").unwrap_or_default();
+    let offset = std::env::var("E2E_MODEL_OFFSET")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    (roster, offset)
+}
 
 fn prepare_auth() -> bool {
     if std::env::var("GEMINI_API_KEY")
@@ -35,92 +74,146 @@ fn prepare_auth() -> bool {
 /// `roster[(offset + test_index) % len]`. An empty roster is `None` — the
 /// caller must skip `session/set_model` and let agy use the settings.json
 /// default. A single-entry roster is a no-op rotation (both tests get the
-/// same model).
-fn pick_model_from(roster: &str, offset: usize, test_index: usize) -> Option<String> {
-    let roster: Vec<&str> = roster
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
+/// same model). A `last_good` model that is in the roster wins over the
+/// rotation slot.
+fn pick_model_from(
+    roster: &str,
+    offset: usize,
+    test_index: usize,
+    last_good: Option<&str>,
+) -> Option<String> {
+    let roster = parse_roster(roster);
     if roster.is_empty() {
         return None;
+    }
+    if let Some(good) = last_good {
+        if roster.contains(&good) {
+            return Some(good.to_string());
+        }
     }
     Some(roster[(offset + test_index) % roster.len()].to_string())
 }
 
-/// CI sets `E2E_MODEL_ROSTER` (flash-low slugs) and `E2E_MODEL_OFFSET`
+/// CI sets `E2E_MODEL_ROSTER` (flash slugs) and `E2E_MODEL_OFFSET`
 /// (`github.run_number`). Unset or empty roster → `None`.
 fn pick_model(test_index: usize) -> Option<String> {
-    let roster = std::env::var("E2E_MODEL_ROSTER").unwrap_or_default();
-    let offset = std::env::var("E2E_MODEL_OFFSET")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    pick_model_from(&roster, offset, test_index)
+    let (roster, offset) = roster_env();
+    let last_good = lock_model(&LAST_GOOD_MODEL).clone();
+    pick_model_from(&roster, offset, test_index, last_good.as_deref())
 }
 
-/// Pick a different roster position for a retry of this test's model turn.
-/// Retry zero is the initial assignment, so it does not switch models.
+/// The model a retry switches to: the roster entry after the one that just
+/// failed, so each retry tries a model this turn has not used yet. When the
+/// failing model is unknown or not in the roster, fall back to the rotation
+/// slot advanced by the retry number. Retry zero is the initial assignment,
+/// so it does not switch models.
 fn retry_model_from(
     roster: &str,
     offset: usize,
     test_index: usize,
     retry_number: usize,
+    failed: Option<&str>,
 ) -> Option<String> {
     if retry_number == 0 {
         return None;
     }
-    pick_model_from(roster, offset, test_index + retry_number)
+    let list = parse_roster(roster);
+    if let Some(pos) = failed.and_then(|f| list.iter().position(|m| *m == f)) {
+        return Some(list[(pos + 1) % list.len()].to_string());
+    }
+    pick_model_from(roster, offset, test_index + retry_number, None)
 }
 
-fn retry_model(test_index: usize, retry_number: usize) -> Option<String> {
-    let roster = std::env::var("E2E_MODEL_ROSTER").unwrap_or_default();
-    let offset = std::env::var("E2E_MODEL_OFFSET")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    retry_model_from(&roster, offset, test_index, retry_number)
+/// Record the outcome of a turn on the current model: success makes it the
+/// preferred start for later tests; failure stops preferring it.
+fn record_turn_outcome(succeeded: bool) {
+    let current = lock_model(&CURRENT_MODEL).clone();
+    let mut last_good = lock_model(&LAST_GOOD_MODEL);
+    if succeeded {
+        if current.is_some() {
+            *last_good = current;
+        }
+    } else if current.is_some() && *last_good == current {
+        *last_good = None;
+    }
 }
 
 #[test]
 fn pick_model_from_empty_or_whitespace_is_none() {
-    assert_eq!(pick_model_from("", 0, 0), None);
-    assert_eq!(pick_model_from("  , , ", 7, 1), None);
+    assert_eq!(pick_model_from("", 0, 0, None), None);
+    assert_eq!(pick_model_from("  , , ", 7, 1, None), None);
 }
 
 #[test]
 fn pick_model_from_rotates_by_offset_and_index() {
     let roster = "a,b,c";
     // Run 0: full_round_trip -> a, session_load -> b
-    assert_eq!(pick_model_from(roster, 0, 0).as_deref(), Some("a"));
-    assert_eq!(pick_model_from(roster, 0, 1).as_deref(), Some("b"));
+    assert_eq!(pick_model_from(roster, 0, 0, None).as_deref(), Some("a"));
+    assert_eq!(pick_model_from(roster, 0, 1, None).as_deref(), Some("b"));
     // Run 1: b, c
-    assert_eq!(pick_model_from(roster, 1, 0).as_deref(), Some("b"));
-    assert_eq!(pick_model_from(roster, 1, 1).as_deref(), Some("c"));
+    assert_eq!(pick_model_from(roster, 1, 0, None).as_deref(), Some("b"));
+    assert_eq!(pick_model_from(roster, 1, 1, None).as_deref(), Some("c"));
     // Run 2: c, a — the 2-turn load wraps onto a
-    assert_eq!(pick_model_from(roster, 2, 0).as_deref(), Some("c"));
-    assert_eq!(pick_model_from(roster, 2, 1).as_deref(), Some("a"));
+    assert_eq!(pick_model_from(roster, 2, 0, None).as_deref(), Some("c"));
+    assert_eq!(pick_model_from(roster, 2, 1, None).as_deref(), Some("a"));
 }
 
 #[test]
 fn pick_model_from_single_entry_is_a_noop() {
-    assert_eq!(pick_model_from("only", 0, 0).as_deref(), Some("only"));
-    assert_eq!(pick_model_from("only", 0, 1).as_deref(), Some("only"));
-    assert_eq!(pick_model_from("only", 9, 1).as_deref(), Some("only"));
+    assert_eq!(pick_model_from("only", 0, 0, None).as_deref(), Some("only"));
+    assert_eq!(pick_model_from("only", 0, 1, None).as_deref(), Some("only"));
+    assert_eq!(pick_model_from("only", 9, 1, None).as_deref(), Some("only"));
 }
 
 #[test]
 fn pick_model_from_trims_and_drops_empty_tokens() {
-    assert_eq!(pick_model_from(" a, ,b ", 0, 1).as_deref(), Some("b"));
+    assert_eq!(pick_model_from(" a, ,b ", 0, 1, None).as_deref(), Some("b"));
 }
 
 #[test]
 fn retry_model_advances_through_the_roster() {
     let roster = "a,b,c";
-    assert_eq!(retry_model_from(roster, 0, 1, 0), None);
-    assert_eq!(retry_model_from(roster, 0, 1, 1).as_deref(), Some("c"));
-    assert_eq!(retry_model_from(roster, 0, 1, 2).as_deref(), Some("a"));
-    assert_eq!(retry_model_from("only", 0, 0, 1).as_deref(), Some("only"));
+    assert_eq!(retry_model_from(roster, 0, 1, 0, Some("b")), None);
+    assert_eq!(
+        retry_model_from(roster, 0, 1, 1, Some("b")).as_deref(),
+        Some("c")
+    );
+    assert_eq!(
+        retry_model_from(roster, 0, 1, 2, Some("c")).as_deref(),
+        Some("a")
+    );
+    assert_eq!(
+        retry_model_from("only", 0, 0, 1, Some("only")).as_deref(),
+        Some("only")
+    );
+}
+
+#[test]
+fn retry_model_without_a_known_failure_uses_the_rotation_slot() {
+    let roster = "a,b,c";
+    assert_eq!(
+        retry_model_from(roster, 0, 1, 1, None).as_deref(),
+        Some("c")
+    );
+    assert_eq!(
+        retry_model_from(roster, 0, 1, 1, Some("zzz")).as_deref(),
+        Some("c")
+    );
+}
+
+#[test]
+fn pick_model_prefers_a_last_good_model_in_the_roster() {
+    let roster = "a,b,c";
+    assert_eq!(
+        pick_model_from(roster, 0, 1, Some("c")).as_deref(),
+        Some("c")
+    );
+    // A slug that has left the roster is ignored.
+    assert_eq!(
+        pick_model_from(roster, 0, 1, Some("zzz")).as_deref(),
+        Some("b")
+    );
+    assert_eq!(pick_model_from("", 0, 1, Some("c")), None);
 }
 
 #[test]
@@ -307,16 +400,19 @@ fn maybe_set_model(
                 "session/set_model error for {slug}: {}",
                 val["error"]
             );
+            *lock_model(&CURRENT_MODEL) = Some(slug);
         }
         None => {
+            *lock_model(&CURRENT_MODEL) = None;
             eprintln!("[e2e] model: (settings.json default; no E2E_MODEL_ROSTER)");
         }
     }
 }
 
-/// Switch a retried prompt to the next configured roster member. A missing or
-/// rejected retry assignment is only diagnostic: the prompt still retries on
-/// the current model, preserving the original failure in the test output.
+/// Switch a retried prompt to the next roster model after the one that failed,
+/// skipping any candidate that `session/set_model` rejects. If every candidate
+/// is rejected (or there is no roster), the prompt retries on the current
+/// model, preserving the original failure in the test output.
 fn switch_to_retry_model(
     stdin: &mut std::process::ChildStdin,
     reader: &mut std::io::BufReader<std::process::ChildStdout>,
@@ -325,23 +421,46 @@ fn switch_to_retry_model(
     retry_number: usize,
     prompt_id: u64,
 ) {
-    let Some(slug) = retry_model(test_index, retry_number) else {
+    let (roster, offset) = roster_env();
+    let roster_len = parse_roster(&roster).len();
+    if roster_len == 0 {
         eprintln!("[e2e] retry model: (settings.json default; no E2E_MODEL_ROSTER)");
         return;
-    };
-    eprintln!("[e2e] retry model: {slug}");
-    let rpc_id = 10_000 + prompt_id * TURN_ATTEMPTS as u64 + retry_number as u64;
-    let response = send_recv_id(
-        stdin,
-        reader,
-        rpc_id,
-        &set_model_rpc(rpc_id, session_id, &slug),
-    );
-    if !response["error"].is_null() {
+    }
+    // Step past the model that just failed and, if set_model rejects a
+    // candidate, past that one too, so a rejected slug is not picked again on
+    // every later retry while the rest of the roster goes untried.
+    let mut skip_from = lock_model(&CURRENT_MODEL).clone();
+    for try_number in 0..roster_len {
+        let Some(slug) = retry_model_from(
+            &roster,
+            offset,
+            test_index,
+            retry_number,
+            skip_from.as_deref(),
+        ) else {
+            return;
+        };
+        eprintln!("[e2e] retry model: {slug}");
+        // Unique per prompt, retry and candidate: retries and candidates are
+        // each bounded by twice the roster length, far below these strides.
+        let rpc_id =
+            10_000_000 + prompt_id * 1_000_000 + retry_number as u64 * 1_000 + try_number as u64;
+        let response = send_recv_id(
+            stdin,
+            reader,
+            rpc_id,
+            &set_model_rpc(rpc_id, session_id, &slug),
+        );
+        if response["error"].is_null() {
+            *lock_model(&CURRENT_MODEL) = Some(slug);
+            return;
+        }
         eprintln!(
             "[e2e] retry model switch failed for {slug}: {}",
             response["error"]
         );
+        skip_from = Some(slug);
     }
 }
 
@@ -396,45 +515,69 @@ fn send_recv_id(
     }
 }
 
-/// Attempts for one model turn: the first try plus two bounded retries.
-const TURN_ATTEMPTS: u32 = 3;
-const _: () = assert!(TURN_ATTEMPTS >= 1);
+/// Sweeps over the roster for one model turn. Each model is its own quota and
+/// capacity pool, so waiting does not help a *different* model: a turn steps
+/// through every roster model with only a short pause, and backs off only
+/// after the whole roster has refused once.
+const TURN_PASSES: usize = 2;
 
-/// Delays before resending a failed turn. The first catches brief 503 capacity
-/// spikes; the second exceeds the observed per-minute 429 `retryDelay ~37s`.
-const TURN_RETRY_DELAYS_SECS: [u64; 2] = [30, 60];
-const _: () = assert!(TURN_RETRY_DELAYS_SECS.len() == (TURN_ATTEMPTS - 1) as usize);
+/// Pause between models within a sweep: enough to let a brief 503 spike pass
+/// without stalling a turn whose next model may be healthy.
+const MODEL_STEP_DELAY_SECS: u64 = 15;
 
-/// Returns the delay for a valid retry count, never panicking on a bad caller.
-fn retry_delay_secs(attempts_left: u32) -> Option<u64> {
-    if !(1..TURN_ATTEMPTS).contains(&attempts_left) {
-        return None;
-    }
-    let retry_index = (TURN_ATTEMPTS - attempts_left - 1) as usize;
-    TURN_RETRY_DELAYS_SECS.get(retry_index).copied()
+/// Pause before the second sweep, once every roster model has refused. It
+/// exceeds the observed per-minute 429 `retryDelay` (~37s).
+const PASS_DELAY_SECS: u64 = 60;
+
+/// Wall-clock budget for one turn including retries. agy can stay silent for
+/// its whole 5-minute print timeout on a single attempt, so the attempt count
+/// alone does not bound a turn; no new attempt starts once its delay would
+/// cross this budget. Three model turns run per CI job, so 25 min keeps them
+/// and the build inside the job timeout.
+const TURN_BUDGET_SECS: u64 = 25 * 60;
+
+/// How long one model turn may take before the harness gives up on it. agy
+/// retries a 503 internally and stays silent until its print-mode timeout (5
+/// min by default) ends the turn, so a shorter deadline turns agy's own error
+/// into a bare "Timed out". Keep this above that timeout.
+const TURN_DEADLINE_SECS: u64 = 330;
+
+/// Total attempts for one turn: every roster model once per sweep. An empty
+/// roster still gets one attempt per sweep, on the settings.json default.
+fn turn_attempts(roster_len: usize) -> usize {
+    TURN_PASSES * roster_len.max(1)
 }
 
-fn retry_number(attempts_left: u32) -> Option<usize> {
-    (1..TURN_ATTEMPTS)
-        .contains(&attempts_left)
-        .then_some((TURN_ATTEMPTS - attempts_left) as usize)
+/// The pause before attempt `attempt` (0-based; the first attempt has none):
+/// [`PASS_DELAY_SECS`] at the start of a new sweep, [`MODEL_STEP_DELAY_SECS`]
+/// otherwise.
+fn attempt_delay_secs(attempt: usize, roster_len: usize) -> u64 {
+    if attempt == 0 {
+        0
+    } else if attempt % roster_len.max(1) == 0 {
+        PASS_DELAY_SECS
+    } else {
+        MODEL_STEP_DELAY_SECS
+    }
 }
 
 #[test]
-fn retry_delays_back_off_without_exceeding_the_e2e_budget() {
-    assert_eq!(retry_delay_secs(2), Some(30));
-    assert_eq!(retry_delay_secs(1), Some(60));
-    assert_eq!(retry_delay_secs(0), None);
-    assert_eq!(retry_delay_secs(TURN_ATTEMPTS), None);
-    assert_eq!(retry_number(2), Some(1));
-    assert_eq!(retry_number(1), Some(2));
-    assert_eq!(retry_number(0), None);
-    assert_eq!(retry_number(TURN_ATTEMPTS), None);
+fn turn_schedule_sweeps_the_roster_then_backs_off() {
+    // Three models: two sweeps of three, pausing 60s only between sweeps.
+    assert_eq!(turn_attempts(3), 6);
+    let delays: Vec<u64> = (0..6).map(|k| attempt_delay_secs(k, 3)).collect();
+    assert_eq!(delays, [0, 15, 15, 60, 15, 15]);
+    // An empty roster still retries once, after the sweep pause.
+    assert_eq!(turn_attempts(0), 2);
+    assert_eq!(attempt_delay_secs(1, 0), 60);
+    assert_eq!(turn_attempts(1), 2);
+    assert_eq!(attempt_delay_secs(1, 1), 60);
 }
 
-/// Decide whether a failed turn is worth resending. Sleeps before returning
-/// true. Always logs, so a retried turn is visible in the test output; on the
-/// final failure, points at the agy log, which names provider status and quota
+/// Decide whether a failed turn is worth resending, and sleep before
+/// returning true. `next` is the 0-based attempt about to be made. Always
+/// logs, so a retried turn is visible in the test output; on the final
+/// failure, points at the agy log, which names provider status and quota
 /// details when agy exposes them.
 ///
 /// The retry is deliberately blind to the error text: a failed turn surfaces
@@ -442,24 +585,38 @@ fn retry_delays_back_off_without_exceeding_the_e2e_budget() {
 /// entirely, so matching "429"/"503" would miss transient phrasings while
 /// coupling us to agy stderr wording. Refusals are not errors here
 /// (`stopReason: "refusal"`), and malformed/session/auth failures cannot occur
-/// past the harness gates — so the only cost of a needless retry is at most 90s
-/// of backoff on an already-failed run.
-fn await_turn_retry(err: &Value, attempts_left: u32) -> bool {
+/// past the harness gates — so a needless retry costs only a short pause on an
+/// already-failed run.
+fn await_turn_retry(
+    err: &Value,
+    next: usize,
+    roster_len: usize,
+    started: std::time::Instant,
+) -> bool {
     use std::time::Duration;
-    if attempts_left == 0 {
-        eprintln!("[e2e] turn failed after retry; not retrying: {err}");
+    let total = turn_attempts(roster_len);
+    if next >= total {
+        eprintln!("[e2e] turn failed on every roster model twice; not retrying: {err}");
         eprintln!("[e2e] hint: provider details are in the agy-logs CI artifact");
         return false;
     }
-    let Some(delay_secs) = retry_delay_secs(attempts_left) else {
-        eprintln!("[e2e] invalid retry count; not retrying: {err}");
+    let delay_secs = attempt_delay_secs(next, roster_len);
+    if started.elapsed().as_secs() + delay_secs > TURN_BUDGET_SECS {
+        eprintln!("[e2e] turn budget of {TURN_BUDGET_SECS}s spent; not retrying: {err}");
+        eprintln!("[e2e] hint: provider details are in the agy-logs CI artifact");
         return false;
-    };
-    eprintln!("[e2e] turn error, retrying ({attempts_left} remaining) after {delay_secs}s: {err}");
+    }
+    eprintln!(
+        "[e2e] turn error, attempt {} of {total} after {delay_secs}s: {err}",
+        next + 1
+    );
     std::thread::sleep(Duration::from_secs(delay_secs));
     true
 }
 
+/// Send a `session/prompt` and wait for its response, collecting the agent's
+/// answer text. A failed turn is retried on each roster model in turn, twice
+/// over (see [`TURN_PASSES`]); every outcome updates the preferred model.
 fn send_prompt_wait(
     stdin: &mut std::process::ChildStdin,
     reader: &mut std::io::BufReader<std::process::ChildStdout>,
@@ -471,7 +628,9 @@ fn send_prompt_wait(
     use std::io::{BufRead, Write};
     use std::time::Duration;
 
-    let mut attempts_left = TURN_ATTEMPTS - 1;
+    let roster_len = parse_roster(&roster_env().0).len();
+    let started = std::time::Instant::now();
+    let mut next = 1;
     loop {
         let msg = format!(
             r#"{{"jsonrpc":"2.0","id":{},"method":"session/prompt","params":{{"sessionId":"{}","prompt":[{{"type":"text","text":"{}"}}]}}}}"#,
@@ -482,14 +641,14 @@ fn send_prompt_wait(
         writeln!(stdin, "{}", msg).unwrap();
         stdin.flush().unwrap();
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        let deadline = std::time::Instant::now() + Duration::from_secs(TURN_DEADLINE_SECS);
         // Accumulated, not overwritten: the answer arrives as deltas, and the
         // last one is often just a newline. Overwriting would make assertions
         // depend on how the model happened to chunk its reply.
         let mut notification_text: Option<String> = None;
         let resp = loop {
             if std::time::Instant::now() > deadline {
-                panic!("Timed out");
+                panic!("Timed out after {TURN_DEADLINE_SECS}s waiting for the turn");
             }
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
@@ -507,17 +666,15 @@ fn send_prompt_wait(
                 break msg;
             }
         };
+        record_turn_outcome(resp["error"].is_null());
         if resp["error"].is_null() {
             return (notification_text, resp);
         }
-        if !await_turn_retry(&resp["error"], attempts_left) {
+        if !await_turn_retry(&resp["error"], next, roster_len, started) {
             return (notification_text, resp);
         }
-        let Some(retry_number) = retry_number(attempts_left) else {
-            return (notification_text, resp);
-        };
-        switch_to_retry_model(stdin, reader, session_id, test_index, retry_number, id);
-        attempts_left -= 1;
+        switch_to_retry_model(stdin, reader, session_id, test_index, next, id);
+        next += 1;
     }
 }
 

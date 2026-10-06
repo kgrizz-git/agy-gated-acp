@@ -161,19 +161,26 @@ must identify the software that was installed. The first versioned delivery was
    - `agy` in `PATH` (install from `google-antigravity/antigravity-cli` releases)
    - Auth via `GEMINI_API_KEY` env var or macOS Keychain (`~/.gemini/antigravity-cli/settings.json`)
    - `cargo build --release` must have been run first
-   - In CI, `E2E_MODEL_ROSTER` (comma-separated `gemini-*-flash-low` slugs) and
+   - In CI, `E2E_MODEL_ROSTER` (comma-separated `gemini-*-flash-low` and
+     `gemini-*-flash-lite` slugs, whichever agy lists) and
      `E2E_MODEL_OFFSET` (`github.run_number`) rotate model-issuing tests via
-     `session/set_model`; with at least two roster entries, those tests use
-     different models in a run and a failed turn advances to the next entry
-     before each retry. This mitigates the observed daily per-model quota and
+     `session/set_model`: the run offset spreads the first test's model across
+     runs, later tests in a run start on the last model that answered, and a
+     failed turn advances to the next entry before each retry. This mitigates the observed daily per-model quota and
      transient per-model capacity failures (probes 2026-09-08: 1 request per
      no-tool turn, base-model metering, no wider ceiling observed at ~30 project
      requests — see plans/completed/e2e-quota-rotation.md). Unset locally,
      tests fall through to the `settings.json` default. `error_paths` does not
-     call the model. A failed turn retries twice, after 30s then 60s, failing
-     over to the next roster model first: the first backoff absorbs short 503
-     capacity spikes and the second exceeds the observed ~37s per-minute-429
-     retryDelay; daily 429s fail again fast, with a hint pointing at the agy log.
+     call the model. A failed turn steps through every roster model with 15s
+     between them, waits 60s once the whole roster has refused (longer than
+     the observed ~37s per-minute-429 retryDelay), then sweeps the roster once
+     more before failing with a hint pointing at the agy log. Each model is
+     its own quota and capacity pool, so the turn does not wait long before
+     trying a different one. Retries stop once a turn has spent 25 min. Starting later tests on the last model that answered
+     matters during an outage, when some models refuse every request while
+     others answer; a model that fails is no longer preferred. Each turn may run 330s, just above agy's 5-minute
+     print-mode timeout, so a turn agy is still retrying internally ends with
+     agy's own error rather than a harness timeout.
    - Local runs: `scripts/e2e-local.sh [filter] [args...]` sources the token
      from `.env.e2e.local` (gitignored) and runs everything under a throwaway
      `HOME`, so the real `~/.gemini` state (OAuth login, settings, session
@@ -191,7 +198,10 @@ CI (`ci.yml`) enforces `cargo build`, unit tests, the ignored I/O tier
 Rust 1.70 is the tested MSRV on Linux and Windows. The Unix-socket `--permission-prompts` bridge is intentionally
 unavailable on Windows and fails closed there. E2e (`e2e.yml`) runs only after
 approval of the protected `e2e` GitHub environment for same-repository PRs;
-fork PRs skip before requesting approval. The environment holds
+fork PRs skip before requesting approval. A newer push to the same PR cancels
+the older run (`concurrency`), and `e2e-sweep.yml` cancels runs still waiting
+on approval after `MAX_WAIT_DAYS` (3) or when their PR closes, so they end
+cancelled rather than failing at GitHub's 30-day approval limit. The environment holds
 `E2E_GEMINI_API_KEY`, and the workflow uses a pinned agy release. Do not use a
 repository-level e2e key: the workflow checks out PR code.
 

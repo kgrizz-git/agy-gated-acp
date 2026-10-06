@@ -52,6 +52,13 @@ document. Delete an entry when it lands, rather than checking it off.
   Plan: [plans/fork-maintenance.md](plans/fork-maintenance.md).
 - Evaluate ACP configuration, per-session workspace roots, and upstream changes
   only with an explicit compatibility plan. Plan: [plans/ecosystem-followups.md](plans/ecosystem-followups.md).
+- Widen the e2e model roster to other free base models agy offers under an API
+  key (e.g. GPT-OSS 120B, Claude Sonnet 4.6). Next: with the CI key and pinned
+  agy, capture `agy models` and try one turn on each non-Gemini-Flash row.
+  Reference: [quota rotation](plans/completed/e2e-quota-rotation.md).
+- Make the e2e agy pin effective and current. Next: find agy's auto-update
+  switch, then bump the pin and its SHA-256 in `e2e.yml`.
+  Reference: [provider outage notes](dev-docs/investigations/e2e-provider-outage-2026-10.md).
 
 ## Icebox
 

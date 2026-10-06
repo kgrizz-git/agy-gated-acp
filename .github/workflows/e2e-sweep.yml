@@ -1,0 +1,80 @@
+# Cancels e2e runs left waiting on environment approval. GitHub holds an
+# unapproved deployment for 30 days and then fails the run, which emails a
+# failure for a run nobody meant to approve. Cancelling instead records it as
+# cancelled: on a closed PR straight away, and otherwise once it has waited
+# longer than MAX_WAIT_DAYS. Superseded pushes are already handled by the
+# concurrency group in e2e.yml.
+#
+# GITHUB_TOKEN with actions: write can cancel a waiting run; it cannot reject
+# the pending deployment, which needs a required reviewer. GitHub disables
+# scheduled workflows after 60 days without repository activity; re-enable this
+# one if that happens.
+name: e2e-sweep
+
+on:
+  schedule:
+    # Daily, 06:17 UTC.
+    - cron: "17 6 * * *"
+  pull_request:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  pull-requests: read
+
+jobs:
+  sweep:
+    # A fork PR's token is read-only, and e2e.yml skips fork PRs before they
+    # ever wait, so there is nothing to cancel for them.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      MAX_WAIT_DAYS: 3
+    steps:
+      - name: Cancel waiting e2e runs on the closed PR
+        if: github.event_name == 'pull_request'
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        # Branch and event alone would also match a later PR that reuses this
+        # branch, so a run is only cancelled when its head commit belongs to
+        # the closed PR and it is not associated only with some other PR (a
+        # replacement opened on the same head). --paginate walks every page.
+        run: |
+          shas=$(gh api --paginate "repos/$GH_REPO/pulls/$PR_NUMBER/commits" --jq '.[].sha')
+          runs=$(gh api --paginate -X GET "repos/$GH_REPO/actions/workflows/e2e.yml/runs" \
+            -f branch="$HEAD_REF" -f event=pull_request -f status=waiting -f per_page=100 \
+            --jq '.workflow_runs[]
+              | select((.pull_requests | length) == 0
+                       or any(.pull_requests[]; .number == (env.PR_NUMBER | tonumber)))
+              | "\(.id) \(.head_sha)"')
+          ids=$(printf '%s\n' "$runs" | while read -r id sha; do
+            [ -n "$id" ] && printf '%s\n' "$shas" | grep -Fxq "$sha" && echo "$id"
+          done || true)
+          for id in $ids; do
+            echo "cancelling e2e run $id (PR #$PR_NUMBER closed)"
+            gh run cancel "$id" || echo "could not cancel $id (finished or approved meanwhile?)"
+          done
+          echo "found $(printf '%s\n' "$ids" | grep -c . || true) waiting run(s)"
+
+      - name: Cancel e2e runs waiting longer than MAX_WAIT_DAYS
+        if: github.event_name != 'pull_request'
+        # The age cutoff is applied server-side, so every page holds only runs
+        # to cancel and --paginate reaches all of them; the jq check repeats it.
+        run: |
+          cutoff=$(( $(date -u +%s) - MAX_WAIT_DAYS * 86400 ))
+          cutoff_iso=$(date -u -d "@$cutoff" +%Y-%m-%dT%H:%M:%SZ)
+          ids=$(gh api --paginate -X GET "repos/$GH_REPO/actions/workflows/e2e.yml/runs" \
+            -f status=waiting -f created="<$cutoff_iso" -f per_page=100 \
+            --jq ".workflow_runs[] | select((.created_at | fromdateiso8601) < $cutoff) | .id")
+          for id in $ids; do
+            echo "cancelling e2e run $id (waiting > ${MAX_WAIT_DAYS}d)"
+            gh run cancel "$id" || echo "could not cancel $id (finished or approved meanwhile?)"
+          done
+          echo "found $(printf '%s\n' "$ids" | grep -c . || true) waiting run(s)"

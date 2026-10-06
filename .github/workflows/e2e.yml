@@ -12,6 +12,15 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same PR cancels the older run, whether it is running or
+# still waiting on environment approval -- a superseded commit's e2e is not
+# worth the quota or the approval. GitHub otherwise keeps an unapproved run
+# waiting for 30 days and then reports it failed; e2e-sweep.yml cancels the
+# ones no push supersedes. Dispatches are keyed by run, so none cancels another.
+concurrency:
+  group: e2e-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   e2e:
     # Fork PRs cannot receive Actions secrets, so skip before requesting the
@@ -22,7 +31,12 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     environment: e2e
-    timeout-minutes: 20
+    # Each model turn stops retrying at a 25-min budget (TURN_BUDGET_SECS in
+    # src/e2e_tests.rs), plus at most one attempt's 330s deadline. The tests
+    # issue three turns (one in full_round_trip, two in session_load), so a
+    # total outage needs about 90 min including the build. Normal runs take a
+    # few minutes.
+    timeout-minutes: 100
     permissions:
       contents: read
     steps:
@@ -96,7 +110,7 @@ jobs:
         #
         # Rather than hardcode a version (the catalog drifts -- 3.5 was
         # dropped, 3.8 is now default), collect every `gemini-<ver>-flash-low`
-        # from the live `agy models` list. Constrain the match to the Gemini
+        # and Flash-Lite slug from the live `agy models` list. Constrain the match to the Gemini
         # Flash family so a future non-Gemini, Pro (e.g. gemini-3.1-pro-low),
         # or otherwise non-free row can never be auto-selected. Fall back to
         # a known-good label if the query is empty.
@@ -134,19 +148,33 @@ jobs:
           fi
           rm -f "$AGY_MODELS_STDERR"
           trap - EXIT
-          # Constrain the match to the Gemini Flash family (`gemini-<ver>-flash-low`),
+          # Constrain the match to the Gemini Flash family (`gemini-<ver>-flash-low`
+          # and Flash-Lite),
           # not any slug ending `-low`, so a future non-Gemini or otherwise
           # non-free row can never be auto-selected. Sort once so the roster
           # order (and hence the run_number rotation) is stable even if agy
           # reorders its list: sorting whole lines sorts by slug, since each
           # line starts with the id, and a version sort keeps 3.10 after 3.9.
           MODELS_SORTED=$(printf '%s\n' "$MODELS_TSV" | sort -V)
-          ROSTER=$(printf '%s\n' "$MODELS_SORTED" | awk -F'\t' \
-            '$1 ~ /^gemini-[0-9.]+-flash-low$/ { s = (s ? s "," $1 : $1) } END { print s }')
+          # Flash-low and Flash-Lite are both free-tier models; take every one
+          # agy lists. Each is a separate quota and capacity pool, and the
+          # tests start on whichever last answered, so a listed model that is
+          # refusing requests costs one failed attempt, not the run.
+          # flash-low first, then Flash-Lite, so stepping to the next entry on
+          # a retry tends to change base model rather than land on another
+          # variant of the one that just failed.
+          ROSTER=$(printf '%s\n' "$MODELS_SORTED" | awk -F'\t' '
+            $1 ~ /^gemini-[0-9.]+-flash-low$/ { low = (low ? low "," $1 : $1) }
+            $1 ~ /^gemini-[0-9.]+-flash-lite(-low)?$/ { lite = (lite ? lite "," $1 : $1) }
+            END { print (low && lite ? low "," lite : low lite) }')
           # Newest first: older versions get dropped (3.5 was), so the live
           # label prefers the highest version over the hardcoded fallback.
+          # settings.json keeps a flash-low label when one exists, and only
+          # falls back to Flash-Lite when agy lists no flash-low model.
           MODEL_LABEL=$(printf '%s\n' "$MODELS_SORTED" | awk -F'\t' \
-            '$1 ~ /^gemini-[0-9.]+-flash-low$/ { label = $2 } END { print label }')
+            '$1 ~ /^gemini-[0-9.]+-flash-low$/ { low = $2 }
+             $1 ~ /^gemini-[0-9.]+-flash-lite(-low)?$/ { lite = $2 }
+             END { print (low != "" ? low : lite) }')
           if [ -z "$ROSTER" ]; then
             # Warn and continue on the settings.json default written above:
             # the roster query can still come back empty (auth drift, catalog
@@ -198,7 +226,7 @@ jobs:
         # by rotating E2E_MODEL_ROSTER rather than by serialization.
         run: cargo test e2e -- --ignored --nocapture --test-threads=1
       - name: Capture agy logs on failure
-        if: failure() && steps.key.outputs.has_key == 'true'
+        if: (failure() || cancelled()) && steps.key.outputs.has_key == 'true'
         # agy's stream error for a provider failure is the opaque "Agent
         # execution terminated due to error" -- the message does not distinguish
         # a 429 from an auth problem from a crash. agy writes the real detail
@@ -218,7 +246,7 @@ jobs:
             echo "no agy cli-*.log found under $LOGDIR; nothing to upload"
           fi
       - name: Upload agy logs
-        if: failure() && steps.key.outputs.has_key == 'true' && env.agy_logs != ''
+        if: (failure() || cancelled()) && steps.key.outputs.has_key == 'true' && env.agy_logs != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: agy-logs-${{ github.run_id }}
