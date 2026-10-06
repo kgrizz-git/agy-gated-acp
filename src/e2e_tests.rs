@@ -4,11 +4,46 @@
 //! Model-issuing tests pick a slug from `E2E_MODEL_ROSTER` via
 //! `session/set_model` so consecutive runs spread the free-tier daily
 //! per-model quota. Retries advance through that same roster to avoid waiting
-//! on one temporarily unavailable model; an empty roster falls through to the
-//! `settings.json` default. `session_load` also asserts conversation memory,
+//! on one temporarily unavailable model, and once a model answers, later tests
+//! start on it; an empty roster falls through to the `settings.json` default. `session_load` also asserts conversation memory,
 //! so there is no separate multi-turn test.
 
 use serde_json::{json, Value};
+use std::sync::Mutex;
+
+/// The roster model that most recently answered a turn in this process. CI
+/// runs these tests serially (`--test-threads=1`) in one process, so a later
+/// test can start on a model already shown to be serving instead of its
+/// rotation slot. During a capacity outage some models refuse every request
+/// while others answer, and this finds a working one without spending
+/// requests on probes: only the first test pays for the search. A model that
+/// fails is no longer preferred.
+static LAST_GOOD_MODEL: Mutex<Option<String>> = Mutex::new(None);
+
+/// The model the current turn runs on, as last applied via `session/set_model`.
+static CURRENT_MODEL: Mutex<Option<String>> = Mutex::new(None);
+
+fn lock_model(cell: &Mutex<Option<String>>) -> std::sync::MutexGuard<'_, Option<String>> {
+    // A panicking test poisons the lock; the value is still a plain slug.
+    cell.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn parse_roster(roster: &str) -> Vec<&str> {
+    roster
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn roster_env() -> (String, usize) {
+    let roster = std::env::var("E2E_MODEL_ROSTER").unwrap_or_default();
+    let offset = std::env::var("E2E_MODEL_OFFSET")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    (roster, offset)
+}
 
 fn prepare_auth() -> bool {
     if std::env::var("GEMINI_API_KEY")
@@ -35,92 +70,152 @@ fn prepare_auth() -> bool {
 /// `roster[(offset + test_index) % len]`. An empty roster is `None` — the
 /// caller must skip `session/set_model` and let agy use the settings.json
 /// default. A single-entry roster is a no-op rotation (both tests get the
-/// same model).
-fn pick_model_from(roster: &str, offset: usize, test_index: usize) -> Option<String> {
-    let roster: Vec<&str> = roster
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
+/// same model). A `last_good` model that is in the roster wins over the
+/// rotation slot.
+fn pick_model_from(
+    roster: &str,
+    offset: usize,
+    test_index: usize,
+    last_good: Option<&str>,
+) -> Option<String> {
+    let roster = parse_roster(roster);
     if roster.is_empty() {
         return None;
+    }
+    if let Some(good) = last_good {
+        if roster.contains(&good) {
+            return Some(good.to_string());
+        }
     }
     Some(roster[(offset + test_index) % roster.len()].to_string())
 }
 
-/// CI sets `E2E_MODEL_ROSTER` (flash-low slugs) and `E2E_MODEL_OFFSET`
+/// CI sets `E2E_MODEL_ROSTER` (flash slugs) and `E2E_MODEL_OFFSET`
 /// (`github.run_number`). Unset or empty roster → `None`.
 fn pick_model(test_index: usize) -> Option<String> {
-    let roster = std::env::var("E2E_MODEL_ROSTER").unwrap_or_default();
-    let offset = std::env::var("E2E_MODEL_OFFSET")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    pick_model_from(&roster, offset, test_index)
+    let (roster, offset) = roster_env();
+    let last_good = lock_model(&LAST_GOOD_MODEL).clone();
+    pick_model_from(&roster, offset, test_index, last_good.as_deref())
 }
 
-/// Pick a different roster position for a retry of this test's model turn.
-/// Retry zero is the initial assignment, so it does not switch models.
+/// The model a retry switches to: the roster entry after the one that just
+/// failed, so each retry tries a model this turn has not used yet. When the
+/// failing model is unknown or not in the roster, fall back to the rotation
+/// slot advanced by the retry number. Retry zero is the initial assignment,
+/// so it does not switch models.
 fn retry_model_from(
     roster: &str,
     offset: usize,
     test_index: usize,
     retry_number: usize,
+    failed: Option<&str>,
 ) -> Option<String> {
     if retry_number == 0 {
         return None;
     }
-    pick_model_from(roster, offset, test_index + retry_number)
+    let list = parse_roster(roster);
+    if let Some(pos) = failed.and_then(|f| list.iter().position(|m| *m == f)) {
+        return Some(list[(pos + 1) % list.len()].to_string());
+    }
+    pick_model_from(roster, offset, test_index + retry_number, None)
 }
 
 fn retry_model(test_index: usize, retry_number: usize) -> Option<String> {
-    let roster = std::env::var("E2E_MODEL_ROSTER").unwrap_or_default();
-    let offset = std::env::var("E2E_MODEL_OFFSET")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    retry_model_from(&roster, offset, test_index, retry_number)
+    let (roster, offset) = roster_env();
+    let failed = lock_model(&CURRENT_MODEL).clone();
+    retry_model_from(&roster, offset, test_index, retry_number, failed.as_deref())
+}
+
+/// Record the outcome of a turn on the current model: success makes it the
+/// preferred start for later tests; failure stops preferring it.
+fn record_turn_outcome(succeeded: bool) {
+    let current = lock_model(&CURRENT_MODEL).clone();
+    let mut last_good = lock_model(&LAST_GOOD_MODEL);
+    if succeeded {
+        if current.is_some() {
+            *last_good = current;
+        }
+    } else if current.is_some() && *last_good == current {
+        *last_good = None;
+    }
 }
 
 #[test]
 fn pick_model_from_empty_or_whitespace_is_none() {
-    assert_eq!(pick_model_from("", 0, 0), None);
-    assert_eq!(pick_model_from("  , , ", 7, 1), None);
+    assert_eq!(pick_model_from("", 0, 0, None), None);
+    assert_eq!(pick_model_from("  , , ", 7, 1, None), None);
 }
 
 #[test]
 fn pick_model_from_rotates_by_offset_and_index() {
     let roster = "a,b,c";
     // Run 0: full_round_trip -> a, session_load -> b
-    assert_eq!(pick_model_from(roster, 0, 0).as_deref(), Some("a"));
-    assert_eq!(pick_model_from(roster, 0, 1).as_deref(), Some("b"));
+    assert_eq!(pick_model_from(roster, 0, 0, None).as_deref(), Some("a"));
+    assert_eq!(pick_model_from(roster, 0, 1, None).as_deref(), Some("b"));
     // Run 1: b, c
-    assert_eq!(pick_model_from(roster, 1, 0).as_deref(), Some("b"));
-    assert_eq!(pick_model_from(roster, 1, 1).as_deref(), Some("c"));
+    assert_eq!(pick_model_from(roster, 1, 0, None).as_deref(), Some("b"));
+    assert_eq!(pick_model_from(roster, 1, 1, None).as_deref(), Some("c"));
     // Run 2: c, a — the 2-turn load wraps onto a
-    assert_eq!(pick_model_from(roster, 2, 0).as_deref(), Some("c"));
-    assert_eq!(pick_model_from(roster, 2, 1).as_deref(), Some("a"));
+    assert_eq!(pick_model_from(roster, 2, 0, None).as_deref(), Some("c"));
+    assert_eq!(pick_model_from(roster, 2, 1, None).as_deref(), Some("a"));
 }
 
 #[test]
 fn pick_model_from_single_entry_is_a_noop() {
-    assert_eq!(pick_model_from("only", 0, 0).as_deref(), Some("only"));
-    assert_eq!(pick_model_from("only", 0, 1).as_deref(), Some("only"));
-    assert_eq!(pick_model_from("only", 9, 1).as_deref(), Some("only"));
+    assert_eq!(pick_model_from("only", 0, 0, None).as_deref(), Some("only"));
+    assert_eq!(pick_model_from("only", 0, 1, None).as_deref(), Some("only"));
+    assert_eq!(pick_model_from("only", 9, 1, None).as_deref(), Some("only"));
 }
 
 #[test]
 fn pick_model_from_trims_and_drops_empty_tokens() {
-    assert_eq!(pick_model_from(" a, ,b ", 0, 1).as_deref(), Some("b"));
+    assert_eq!(pick_model_from(" a, ,b ", 0, 1, None).as_deref(), Some("b"));
 }
 
 #[test]
 fn retry_model_advances_through_the_roster() {
     let roster = "a,b,c";
-    assert_eq!(retry_model_from(roster, 0, 1, 0), None);
-    assert_eq!(retry_model_from(roster, 0, 1, 1).as_deref(), Some("c"));
-    assert_eq!(retry_model_from(roster, 0, 1, 2).as_deref(), Some("a"));
-    assert_eq!(retry_model_from("only", 0, 0, 1).as_deref(), Some("only"));
+    assert_eq!(retry_model_from(roster, 0, 1, 0, Some("b")), None);
+    assert_eq!(
+        retry_model_from(roster, 0, 1, 1, Some("b")).as_deref(),
+        Some("c")
+    );
+    assert_eq!(
+        retry_model_from(roster, 0, 1, 2, Some("c")).as_deref(),
+        Some("a")
+    );
+    assert_eq!(
+        retry_model_from("only", 0, 0, 1, Some("only")).as_deref(),
+        Some("only")
+    );
+}
+
+#[test]
+fn retry_model_without_a_known_failure_uses_the_rotation_slot() {
+    let roster = "a,b,c";
+    assert_eq!(
+        retry_model_from(roster, 0, 1, 1, None).as_deref(),
+        Some("c")
+    );
+    assert_eq!(
+        retry_model_from(roster, 0, 1, 1, Some("zzz")).as_deref(),
+        Some("c")
+    );
+}
+
+#[test]
+fn pick_model_prefers_a_last_good_model_in_the_roster() {
+    let roster = "a,b,c";
+    assert_eq!(
+        pick_model_from(roster, 0, 1, Some("c")).as_deref(),
+        Some("c")
+    );
+    // A slug that has left the roster is ignored.
+    assert_eq!(
+        pick_model_from(roster, 0, 1, Some("zzz")).as_deref(),
+        Some("b")
+    );
+    assert_eq!(pick_model_from("", 0, 1, Some("c")), None);
 }
 
 #[test]
@@ -307,8 +402,10 @@ fn maybe_set_model(
                 "session/set_model error for {slug}: {}",
                 val["error"]
             );
+            *lock_model(&CURRENT_MODEL) = Some(slug);
         }
         None => {
+            *lock_model(&CURRENT_MODEL) = None;
             eprintln!("[e2e] model: (settings.json default; no E2E_MODEL_ROSTER)");
         }
     }
@@ -337,7 +434,9 @@ fn switch_to_retry_model(
         rpc_id,
         &set_model_rpc(rpc_id, session_id, &slug),
     );
-    if !response["error"].is_null() {
+    if response["error"].is_null() {
+        *lock_model(&CURRENT_MODEL) = Some(slug);
+    } else {
         eprintln!(
             "[e2e] retry model switch failed for {slug}: {}",
             response["error"]
@@ -517,6 +616,7 @@ fn send_prompt_wait(
                 break msg;
             }
         };
+        record_turn_outcome(resp["error"].is_null());
         if resp["error"].is_null() {
             return (notification_text, resp);
         }

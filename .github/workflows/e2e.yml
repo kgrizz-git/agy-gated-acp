@@ -147,19 +147,28 @@ jobs:
           fi
           rm -f "$AGY_MODELS_STDERR"
           trap - EXIT
-          # Constrain the match to the Gemini Flash family (`gemini-<ver>-flash-low`),
+          # Constrain the match to the Gemini Flash family (`gemini-<ver>-flash-low`,
+          # or Flash-Lite as a fallback below),
           # not any slug ending `-low`, so a future non-Gemini or otherwise
           # non-free row can never be auto-selected. Sort once so the roster
           # order (and hence the run_number rotation) is stable even if agy
           # reorders its list: sorting whole lines sorts by slug, since each
           # line starts with the id, and a version sort keeps 3.10 after 3.9.
           MODELS_SORTED=$(printf '%s\n' "$MODELS_TSV" | sort -V)
-          ROSTER=$(printf '%s\n' "$MODELS_SORTED" | awk -F'\t' \
-            '$1 ~ /^gemini-[0-9.]+-flash-low$/ { s = (s ? s "," $1 : $1) } END { print s }')
+          # Prefer flash-low. Only when agy lists none (say, the free tier
+          # narrows to Flash-Lite) fall back to Flash-Lite slugs, which are
+          # also free-tier models, rather than an empty roster and a fallback
+          # label that no longer exists.
+          MODEL_RE='^gemini-[0-9.]+-flash-low$'
+          if ! printf '%s\n' "$MODELS_SORTED" | cut -f1 | grep -Eq "$MODEL_RE"; then
+            MODEL_RE='^gemini-[0-9.]+-flash-lite(-low)?$'
+          fi
+          ROSTER=$(printf '%s\n' "$MODELS_SORTED" | awk -F'\t' -v re="$MODEL_RE" \
+            '$1 ~ re { s = (s ? s "," $1 : $1) } END { print s }')
           # Newest first: older versions get dropped (3.5 was), so the live
           # label prefers the highest version over the hardcoded fallback.
-          MODEL_LABEL=$(printf '%s\n' "$MODELS_SORTED" | awk -F'\t' \
-            '$1 ~ /^gemini-[0-9.]+-flash-low$/ { label = $2 } END { print label }')
+          MODEL_LABEL=$(printf '%s\n' "$MODELS_SORTED" | awk -F'\t' -v re="$MODEL_RE" \
+            '$1 ~ re { label = $2 } END { print label }')
           if [ -z "$ROSTER" ]; then
             # Warn and continue on the settings.json default written above:
             # the roster query can still come back empty (auth drift, catalog
