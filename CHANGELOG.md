@@ -13,9 +13,9 @@ versioned delivery as `0.2.0`; everything under that heading shipped together.
 ### Maintenance
 
 - A newer push to a PR cancels its older e2e run, even one still waiting on approval. (PR #27)
-- e2e model turns retry a third time after 5 min. (PR #27)
+- e2e failed turns try every roster model 15s apart, then sweep the roster again after 60s. (PR #27)
+- e2e turns stop retrying after 25 min. (PR #27)
 - e2e tests start on the last model that answered in the run. (PR #27)
-- e2e retries move to the roster model after the one that failed. (PR #27)
 - e2e roster includes every Flash-Lite slug agy lists alongside flash-low. (PR #27)
 - e2e per-turn deadline rises from 120s to 330s, above agy's print-mode timeout. (PR #27)
 - e2e job timeout rises from 20 to 100 min. (PR #27)

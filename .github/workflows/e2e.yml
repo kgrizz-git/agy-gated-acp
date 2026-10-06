@@ -31,11 +31,11 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     environment: e2e
-    # Worst case per model turn: four attempts that each run to agy's 5-min
-    # print timeout plus 6.5 min of backoff (30s + 60s + 5 min), about 26.5
-    # min. The e2e tests issue three turns (one in full_round_trip, two in
-    # session_load), so a total outage needs about 80 min plus the build.
-    # Normal runs take a few minutes.
+    # Each model turn stops retrying at a 25-min budget (TURN_BUDGET_SECS in
+    # src/e2e_tests.rs), plus at most one attempt's 330s deadline. The tests
+    # issue three turns (one in full_round_trip, two in session_load), so a
+    # total outage needs about 90 min including the build. Normal runs take a
+    # few minutes.
     timeout-minutes: 100
     permissions:
       contents: read

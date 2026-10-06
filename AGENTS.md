@@ -171,12 +171,12 @@ must identify the software that was installed. The first versioned delivery was
      no-tool turn, base-model metering, no wider ceiling observed at ~30 project
      requests — see plans/completed/e2e-quota-rotation.md). Unset locally,
      tests fall through to the `settings.json` default. `error_paths` does not
-     call the model. A failed turn retries three times, after 30s, 60s, then
-     5 min, failing over to the next roster model first: the first backoff
-     absorbs short 503 capacity spikes, the second exceeds the observed ~37s
-     per-minute-429 retryDelay, and the third outlasts a high-demand 503 that
-     hit every roster model; daily 429s fail again fast, with a hint pointing
-     at the agy log. Starting later tests on the last model that answered
+     call the model. A failed turn steps through every roster model with 15s
+     between them, waits 60s once the whole roster has refused (longer than
+     the observed ~37s per-minute-429 retryDelay), then sweeps the roster once
+     more before failing with a hint pointing at the agy log. Each model is
+     its own quota and capacity pool, so the turn does not wait long before
+     trying a different one. Retries stop once a turn has spent 25 min. Starting later tests on the last model that answered
      matters during an outage, when some models refuse every request while
      others answer; a model that fails is no longer preferred. Each turn may run 330s, just above agy's 5-minute
      print-mode timeout, so a turn agy is still retrying internally ends with

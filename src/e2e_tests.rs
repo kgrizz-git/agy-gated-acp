@@ -433,7 +433,8 @@ fn switch_to_retry_model(
         return;
     };
     eprintln!("[e2e] retry model: {slug}");
-    let rpc_id = 10_000 + prompt_id * TURN_ATTEMPTS as u64 + retry_number as u64;
+    // Room for 1000 attempts per prompt id, far above any roster's two sweeps.
+    let rpc_id = 10_000 + prompt_id * 1_000 + retry_number as u64;
     let response = send_recv_id(
         stdin,
         reader,
@@ -501,9 +502,26 @@ fn send_recv_id(
     }
 }
 
-/// Attempts for one model turn: the first try plus three bounded retries.
-const TURN_ATTEMPTS: u32 = 4;
-const _: () = assert!(TURN_ATTEMPTS >= 1);
+/// Sweeps over the roster for one model turn. Each model is its own quota and
+/// capacity pool, so waiting does not help a *different* model: a turn steps
+/// through every roster model with only a short pause, and backs off only
+/// after the whole roster has refused once.
+const TURN_PASSES: usize = 2;
+
+/// Pause between models within a sweep: enough to let a brief 503 spike pass
+/// without stalling a turn whose next model may be healthy.
+const MODEL_STEP_DELAY_SECS: u64 = 15;
+
+/// Pause before the second sweep, once every roster model has refused. It
+/// exceeds the observed per-minute 429 `retryDelay` (~37s).
+const PASS_DELAY_SECS: u64 = 60;
+
+/// Wall-clock budget for one turn including retries. agy can stay silent for
+/// its whole 5-minute print timeout on a single attempt, so the attempt count
+/// alone does not bound a turn; no new attempt starts once its delay would
+/// cross this budget. Three model turns run per CI job, so 25 min keeps them
+/// and the build inside the job timeout.
+const TURN_BUDGET_SECS: u64 = 25 * 60;
 
 /// How long one model turn may take before the harness gives up on it. agy
 /// retries a 503 internally and stays silent until its print-mode timeout (5
@@ -511,47 +529,42 @@ const _: () = assert!(TURN_ATTEMPTS >= 1);
 /// into a bare "Timed out". Keep this above that timeout.
 const TURN_DEADLINE_SECS: u64 = 330;
 
-/// Delays before resending a failed turn. The first catches brief 503 capacity
-/// spikes; the second exceeds the observed per-minute 429 `retryDelay ~37s`;
-/// the third outlasts a high-demand 503 that persisted across every roster
-/// model through the first two.
-const TURN_RETRY_DELAYS_SECS: [u64; 3] = [30, 60, 300];
-const _: () = assert!(TURN_RETRY_DELAYS_SECS.len() == (TURN_ATTEMPTS - 1) as usize);
-
-/// Returns the delay for a valid retry count, never panicking on a bad caller.
-fn retry_delay_secs(attempts_left: u32) -> Option<u64> {
-    if !(1..TURN_ATTEMPTS).contains(&attempts_left) {
-        return None;
-    }
-    let retry_index = (TURN_ATTEMPTS - attempts_left - 1) as usize;
-    TURN_RETRY_DELAYS_SECS.get(retry_index).copied()
+/// Total attempts for one turn: every roster model once per sweep. An empty
+/// roster still gets one attempt per sweep, on the settings.json default.
+fn turn_attempts(roster_len: usize) -> usize {
+    TURN_PASSES * roster_len.max(1)
 }
 
-/// Which retry (1-based) a turn with `attempts_left` is about to make, or
-/// `None` when no retry remains.
-fn retry_number(attempts_left: u32) -> Option<usize> {
-    (1..TURN_ATTEMPTS)
-        .contains(&attempts_left)
-        .then_some((TURN_ATTEMPTS - attempts_left) as usize)
+/// The pause before attempt `attempt` (0-based; the first attempt has none):
+/// [`PASS_DELAY_SECS`] at the start of a new sweep, [`MODEL_STEP_DELAY_SECS`]
+/// otherwise.
+fn attempt_delay_secs(attempt: usize, roster_len: usize) -> u64 {
+    if attempt == 0 {
+        0
+    } else if attempt % roster_len.max(1) == 0 {
+        PASS_DELAY_SECS
+    } else {
+        MODEL_STEP_DELAY_SECS
+    }
 }
 
 #[test]
-fn retry_delays_back_off_without_exceeding_the_e2e_budget() {
-    assert_eq!(retry_delay_secs(3), Some(30));
-    assert_eq!(retry_delay_secs(2), Some(60));
-    assert_eq!(retry_delay_secs(1), Some(300));
-    assert_eq!(retry_delay_secs(0), None);
-    assert_eq!(retry_delay_secs(TURN_ATTEMPTS), None);
-    assert_eq!(retry_number(3), Some(1));
-    assert_eq!(retry_number(2), Some(2));
-    assert_eq!(retry_number(1), Some(3));
-    assert_eq!(retry_number(0), None);
-    assert_eq!(retry_number(TURN_ATTEMPTS), None);
+fn turn_schedule_sweeps_the_roster_then_backs_off() {
+    // Three models: two sweeps of three, pausing 60s only between sweeps.
+    assert_eq!(turn_attempts(3), 6);
+    let delays: Vec<u64> = (0..6).map(|k| attempt_delay_secs(k, 3)).collect();
+    assert_eq!(delays, [0, 15, 15, 60, 15, 15]);
+    // An empty roster still retries once, after the sweep pause.
+    assert_eq!(turn_attempts(0), 2);
+    assert_eq!(attempt_delay_secs(1, 0), 60);
+    assert_eq!(turn_attempts(1), 2);
+    assert_eq!(attempt_delay_secs(1, 1), 60);
 }
 
-/// Decide whether a failed turn is worth resending. Sleeps before returning
-/// true. Always logs, so a retried turn is visible in the test output; on the
-/// final failure, points at the agy log, which names provider status and quota
+/// Decide whether a failed turn is worth resending, and sleep before
+/// returning true. `next` is the 0-based attempt about to be made. Always
+/// logs, so a retried turn is visible in the test output; on the final
+/// failure, points at the agy log, which names provider status and quota
 /// details when agy exposes them.
 ///
 /// The retry is deliberately blind to the error text: a failed turn surfaces
@@ -559,27 +572,38 @@ fn retry_delays_back_off_without_exceeding_the_e2e_budget() {
 /// entirely, so matching "429"/"503" would miss transient phrasings while
 /// coupling us to agy stderr wording. Refusals are not errors here
 /// (`stopReason: "refusal"`), and malformed/session/auth failures cannot occur
-/// past the harness gates — so the only cost of a needless retry is at most 390s
-/// of backoff on an already-failed run.
-fn await_turn_retry(err: &Value, attempts_left: u32) -> bool {
+/// past the harness gates — so a needless retry costs only a short pause on an
+/// already-failed run.
+fn await_turn_retry(
+    err: &Value,
+    next: usize,
+    roster_len: usize,
+    started: std::time::Instant,
+) -> bool {
     use std::time::Duration;
-    if attempts_left == 0 {
-        eprintln!("[e2e] turn failed after retry; not retrying: {err}");
+    let total = turn_attempts(roster_len);
+    if next >= total {
+        eprintln!("[e2e] turn failed on every roster model twice; not retrying: {err}");
         eprintln!("[e2e] hint: provider details are in the agy-logs CI artifact");
         return false;
     }
-    let Some(delay_secs) = retry_delay_secs(attempts_left) else {
-        eprintln!("[e2e] invalid retry count; not retrying: {err}");
+    let delay_secs = attempt_delay_secs(next, roster_len);
+    if started.elapsed().as_secs() + delay_secs > TURN_BUDGET_SECS {
+        eprintln!("[e2e] turn budget of {TURN_BUDGET_SECS}s spent; not retrying: {err}");
+        eprintln!("[e2e] hint: provider details are in the agy-logs CI artifact");
         return false;
-    };
-    eprintln!("[e2e] turn error, retrying ({attempts_left} remaining) after {delay_secs}s: {err}");
+    }
+    eprintln!(
+        "[e2e] turn error, attempt {} of {total} after {delay_secs}s: {err}",
+        next + 1
+    );
     std::thread::sleep(Duration::from_secs(delay_secs));
     true
 }
 
 /// Send a `session/prompt` and wait for its response, collecting the agent's
-/// answer text. A failed turn is retried up to `TURN_ATTEMPTS` times, switching
-/// model before each retry; every outcome updates the preferred model.
+/// answer text. A failed turn is retried on each roster model in turn, twice
+/// over (see [`TURN_PASSES`]); every outcome updates the preferred model.
 fn send_prompt_wait(
     stdin: &mut std::process::ChildStdin,
     reader: &mut std::io::BufReader<std::process::ChildStdout>,
@@ -591,7 +615,9 @@ fn send_prompt_wait(
     use std::io::{BufRead, Write};
     use std::time::Duration;
 
-    let mut attempts_left = TURN_ATTEMPTS - 1;
+    let roster_len = parse_roster(&roster_env().0).len();
+    let started = std::time::Instant::now();
+    let mut next = 1;
     loop {
         let msg = format!(
             r#"{{"jsonrpc":"2.0","id":{},"method":"session/prompt","params":{{"sessionId":"{}","prompt":[{{"type":"text","text":"{}"}}]}}}}"#,
@@ -631,14 +657,11 @@ fn send_prompt_wait(
         if resp["error"].is_null() {
             return (notification_text, resp);
         }
-        if !await_turn_retry(&resp["error"], attempts_left) {
+        if !await_turn_retry(&resp["error"], next, roster_len, started) {
             return (notification_text, resp);
         }
-        let Some(retry_number) = retry_number(attempts_left) else {
-            return (notification_text, resp);
-        };
-        switch_to_retry_model(stdin, reader, session_id, test_index, retry_number, id);
-        attempts_left -= 1;
+        switch_to_retry_model(stdin, reader, session_id, test_index, next, id);
+        next += 1;
     }
 }
 
