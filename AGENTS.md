@@ -164,9 +164,9 @@ must identify the software that was installed. The first versioned delivery was
    - In CI, `E2E_MODEL_ROSTER` (comma-separated `gemini-*-flash-low` and
      `gemini-*-flash-lite` slugs, whichever agy lists) and
      `E2E_MODEL_OFFSET` (`github.run_number`) rotate model-issuing tests via
-     `session/set_model`; with at least two roster entries, those tests use
-     different models in a run and a failed turn advances to the next entry
-     before each retry. This mitigates the observed daily per-model quota and
+     `session/set_model`: the run offset spreads the first test's model across
+     runs, later tests in a run start on the last model that answered, and a
+     failed turn advances to the next entry before each retry. This mitigates the observed daily per-model quota and
      transient per-model capacity failures (probes 2026-09-08: 1 request per
      no-tool turn, base-model metering, no wider ceiling observed at ~30 project
      requests — see plans/completed/e2e-quota-rotation.md). Unset locally,
@@ -176,10 +176,9 @@ must identify the software that was installed. The first versioned delivery was
      absorbs short 503 capacity spikes, the second exceeds the observed ~37s
      per-minute-429 retryDelay, and the third outlasts a high-demand 503 that
      hit every roster model; daily 429s fail again fast, with a hint pointing
-     at the agy log. Once a turn succeeds, later tests in the run start on
-     that model rather than their rotation slot, since during an outage some
-     models refuse every request while others answer; a model that fails is
-     no longer preferred. Each turn may run 330s, just above agy's 5-minute
+     at the agy log. Starting later tests on the last model that answered
+     matters during an outage, when some models refuse every request while
+     others answer; a model that fails is no longer preferred. Each turn may run 330s, just above agy's 5-minute
      print-mode timeout, so a turn agy is still retrying internally ends with
      agy's own error rather than a harness timeout.
    - Local runs: `scripts/e2e-local.sh [filter] [args...]` sources the token

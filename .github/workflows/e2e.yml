@@ -31,11 +31,12 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     environment: e2e
-    # Worst case per model-issuing test: four turns that each run to the
-    # 330s turn deadline plus 6.5 min of backoff (30s + 60s + 5 min), about
-    # 28.5 min; two such tests plus the build fit in an hour. Normal runs take
-    # a few minutes.
-    timeout-minutes: 60
+    # Worst case per model turn: four attempts that each run to agy's 5-min
+    # print timeout plus 6.5 min of backoff (30s + 60s + 5 min), about 26.5
+    # min. The e2e tests issue three turns (one in full_round_trip, two in
+    # session_load), so a total outage needs about 80 min plus the build.
+    # Normal runs take a few minutes.
+    timeout-minutes: 100
     permissions:
       contents: read
     steps:
@@ -159,9 +160,13 @@ jobs:
           # agy lists. Each is a separate quota and capacity pool, and the
           # tests start on whichever last answered, so a listed model that is
           # refusing requests costs one failed attempt, not the run.
-          MODEL_RE='^gemini-[0-9.]+-flash-(low|lite|lite-low)$'
-          ROSTER=$(printf '%s\n' "$MODELS_SORTED" | awk -F'\t' -v re="$MODEL_RE" \
-            '$1 ~ re { s = (s ? s "," $1 : $1) } END { print s }')
+          # flash-low first, then Flash-Lite, so stepping to the next entry on
+          # a retry tends to change base model rather than land on another
+          # variant of the one that just failed.
+          ROSTER=$(printf '%s\n' "$MODELS_SORTED" | awk -F'\t' '
+            $1 ~ /^gemini-[0-9.]+-flash-low$/ { low = (low ? low "," $1 : $1) }
+            $1 ~ /^gemini-[0-9.]+-flash-lite(-low)?$/ { lite = (lite ? lite "," $1 : $1) }
+            END { print (low && lite ? low "," lite : low lite) }')
           # Newest first: older versions get dropped (3.5 was), so the live
           # label prefers the highest version over the hardcoded fallback.
           # settings.json keeps a flash-low label when one exists, and only
@@ -221,7 +226,7 @@ jobs:
         # by rotating E2E_MODEL_ROSTER rather than by serialization.
         run: cargo test e2e -- --ignored --nocapture --test-threads=1
       - name: Capture agy logs on failure
-        if: failure() && steps.key.outputs.has_key == 'true'
+        if: (failure() || cancelled()) && steps.key.outputs.has_key == 'true'
         # agy's stream error for a provider failure is the opaque "Agent
         # execution terminated due to error" -- the message does not distinguish
         # a 429 from an auth problem from a crash. agy writes the real detail
@@ -241,7 +246,7 @@ jobs:
             echo "no agy cli-*.log found under $LOGDIR; nothing to upload"
           fi
       - name: Upload agy logs
-        if: failure() && steps.key.outputs.has_key == 'true' && env.agy_logs != ''
+        if: (failure() || cancelled()) && steps.key.outputs.has_key == 'true' && env.agy_logs != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: agy-logs-${{ github.run_id }}
