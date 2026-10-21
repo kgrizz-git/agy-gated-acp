@@ -12,6 +12,7 @@ versioned delivery as `0.2.0`; everything under that heading shipped together.
 
 ### Maintenance
 
+- README badges (CI, license, Rust MSRV, ACP), README icon (`docs/assets/icon.jpg`: rainbow-cable suspension bridge squircle), an `LICENSE` file (MIT), and README polish (centered header, contents TOC, related projects section).
 - A newer push to a PR cancels its older e2e run, even one still waiting on approval. (PR #27)
 - e2e failed turns try every roster model 15s apart, then sweep the roster again after 60s. (PR #27)
 - e2e turns stop retrying after 25 min. (PR #27)
