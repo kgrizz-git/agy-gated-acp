@@ -142,7 +142,11 @@ everything under [Permission Prompts](#permission-prompts) applies unchanged.
 
 > Permission prompts require a Unix platform (macOS or Linux). The rest of the
 > adapter remains usable on Windows, but this opt-in mode is safely unavailable
-> there because it relies on Unix-domain sockets.
+> there because it relies on Unix-domain sockets. On Windows, omit
+> `--permission-prompts` from your host config; if the flag is passed anyway,
+> startup prints a short message to stderr and continues without the bridge, so
+> tool calls that need approval are auto-denied like headless `agy` without the
+> adapter.
 
 ```json
 {
@@ -317,7 +321,7 @@ To inspect the JSON-RPC messages between Zed and `agy-gated-acp`, run `dev: open
 - [`javimosch/agy-acp-bridge`](https://github.com/javimosch/agy-acp-bridge) — ACP stdio bridge for `agy`
 - [`tiezbro/paseo-agy-acp`](https://github.com/tiezbro/paseo-agy-acp) — Paseo-focused ACP adapter for `agy`
 
-Notes on what this fork kept from them are in [AGENTS.md](AGENTS.md).
+Notes on what this fork kept from them are in [AGENTS.md](AGENTS.md) and [TODO.md](TODO.md).
 
 For maintainers: [AGENTS.md](AGENTS.md) (architecture and workflow), [CHANGELOG.md](CHANGELOG.md) (shipped changes).
 
