@@ -1,18 +1,34 @@
-# agy-gated-acp
+<h1 align="center">agy-gated-acp</h1>
 
-An [Agent Client Protocol (ACP)](https://agentclientprotocol.com) stdio adapter for [Google Antigravity CLI](https://github.com/google-antigravity/antigravity-cli) (`agy`). It bridges `agy` into any ACP-compatible host like [Zed](https://zed.dev) and [Paseo](#use-with-paseo), enabling you to use Gemini models through `agy` from either.
+<p align="center">
+  <img src="docs/assets/icon.jpg" alt="" width="112">
+</p>
 
-> This is a hard fork of [`hicder/agy-acp`](https://github.com/hicder/agy-acp) —
-> itself an adapter for [Google Antigravity CLI](https://github.com/google-antigravity/antigravity-cli)
-> (`agy`).
-> What this fork adds is the permission-prompt bridge: headless `agy` cannot ask for
-> tool permissions, so this adapter routes them to the ACP host instead of
-> letting them fail silently. Related efforts assessed along the way:
-> [`javimosch/agy-acp-bridge`](https://github.com/javimosch/agy-acp-bridge)
-> (ACP stdio bridge for `agy`) and
-> [`tiezbro/paseo-agy-acp`](https://github.com/tiezbro/paseo-agy-acp)
-> (Paseo-focused ACP adapter for `agy`); what was taken, and what was
-> deliberately not, is recorded in AGENTS.md and tracked in TODO.md.
+<p align="center">
+  <a href="https://github.com/kgrizz-git/agy-gated-acp/actions/workflows/ci.yml"><img src="https://github.com/kgrizz-git/agy-gated-acp/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"></a>
+  <a href="#prerequisites"><img src="https://img.shields.io/badge/rust-1.70%2B-orange" alt="Rust 1.70 or newer"></a>
+  <a href="https://agentclientprotocol.com"><img src="https://img.shields.io/badge/protocol-ACP-blue" alt="Agent Client Protocol"></a>
+</p>
+
+An [Agent Client Protocol (ACP)](https://agentclientprotocol.com) stdio adapter for [Google Antigravity CLI](https://github.com/google-antigravity/antigravity-cli) (`agy`). An ACP host such as [Zed](https://zed.dev) or [Paseo](#use-with-paseo) uses it to drive Gemini models through `agy`.
+
+> Hard fork of [`hicder/agy-acp`](https://github.com/hicder/agy-acp). Headless `agy` cannot ask for tool permissions; this fork sends those decisions to the ACP host. Pass `--permission-prompts`. See [Permission Prompts](#permission-prompts).
+
+## Contents
+
+- [Features](#features)
+- [How It Works](#how-it-works)
+- [Prerequisites](#prerequisites)
+- [Build & Install](#build--install)
+- [Use with Zed](#use-with-zed)
+- [Use with Paseo](#use-with-paseo)
+- [Permission Prompts](#permission-prompts)
+- [Configuration & Environment](#configuration--environment)
+- [Session Persistence](#session-persistence)
+- [Debugging](#debugging)
+- [Related](#related)
+- [License](#license)
 
 ## Features
 
@@ -35,7 +51,7 @@ Zed (ACP host)  <--stdin/stdout JSON-RPC-->  agy-gated-acp  <--subprocess-->  ag
 ## Prerequisites
 
 - **Rust** (1.70+) with Cargo
-- **`agy`** installed and in your `PATH` — install from [google-antigravity/antigravity-cli releases](https://github.com/google-antigravity/antigravity-cli)
+- **`agy`** installed and in your `PATH` — install from [google-antigravity/antigravity-cli releases](https://github.com/google-antigravity/antigravity-cli/releases)
 - **Authentication** — either set `GEMINI_API_KEY` or configure auth via `~/.gemini/antigravity-cli/settings.json`
 
 ## Build & Install
@@ -50,9 +66,11 @@ The binary is generated at `target/release/agy-gated-acp`. Copy it to a director
 cp target/release/agy-gated-acp /usr/local/bin/
 ```
 
+There are no published release binaries yet; build from source (see [CHANGELOG.md](CHANGELOG.md) for version history).
+
 ## Use with Zed
 
-Add `agy-gated-acp` as a custom agent server in your Zed settings (`~/.config/zed/settings.json`):
+Add `agy-gated-acp` as a custom agent server in your Zed settings (`~/.config/zed/settings.json`). The examples below include `--permission-prompts`, which requires **macOS or Linux**; on Windows omit that flag from `args` (see [Permission Prompts](#permission-prompts)).
 
 ```json
 {
@@ -84,7 +102,7 @@ To suppress leading narrative chatter from the model, pass `--skip-naration` in 
     "agy": {
       "type": "custom",
       "command": "agy-gated-acp",
-      "args": ["--skip-naration"],
+      "args": ["--permission-prompts", "--skip-naration"],
       "env": {}
     }
   }
@@ -101,7 +119,7 @@ Set the `AGY_EXTRA_ARGS` environment variable to pass additional arguments to ev
     "agy": {
       "type": "custom",
       "command": "agy-gated-acp",
-      "args": [],
+      "args": ["--permission-prompts"],
       "env": {
         "AGY_EXTRA_ARGS": "--some-flag value"
       }
@@ -124,7 +142,11 @@ everything under [Permission Prompts](#permission-prompts) applies unchanged.
 
 > Permission prompts require a Unix platform (macOS or Linux). The rest of the
 > adapter remains usable on Windows, but this opt-in mode is safely unavailable
-> there because it relies on Unix-domain sockets.
+> there because it relies on Unix-domain sockets. On Windows, omit
+> `--permission-prompts` from your host config; if the flag is passed anyway,
+> startup prints a short message to stderr and continues without the bridge, so
+> tool calls that need approval are auto-denied like headless `agy` without the
+> adapter.
 
 ```json
 {
@@ -294,6 +316,15 @@ Sessions are persisted to `~/.openab/agy-gated-acp/sessions.json`. When you resu
 
 To inspect the JSON-RPC messages between Zed and `agy-gated-acp`, run `dev: open acp logs` from Zed's Command Palette.
 
+## Related
+
+- [`javimosch/agy-acp-bridge`](https://github.com/javimosch/agy-acp-bridge) — ACP stdio bridge for `agy`
+- [`tiezbro/paseo-agy-acp`](https://github.com/tiezbro/paseo-agy-acp) — Paseo-focused ACP adapter for `agy`
+
+Notes on what this fork kept from them are in [AGENTS.md](AGENTS.md) and [TODO.md](TODO.md).
+
+For maintainers: [AGENTS.md](AGENTS.md) (architecture and workflow), [CHANGELOG.md](CHANGELOG.md) (shipped changes).
+
 ## License
 
-MIT
+Licensed under the [MIT License](LICENSE).

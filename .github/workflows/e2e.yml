@@ -98,7 +98,7 @@ jobs:
         # with "Agent execution terminated due to error".
         #
         # Model-issuing tests call session/set_model with a slug from
-        # E2E_MODEL_ROSTER, rotated by E2E_MODEL_OFFSET (github.run_number).
+        # E2E_MODEL_ROSTER, rotated by E2E_MODEL_OFFSET (run_number + run_attempt - 1).
         # This mitigates the observed GenerateRequestsPerDayPerProjectPerModel-
         # FreeTier limit (confirmed 2026-09-08: 1 request per no-tool turn,
         # base-model metering, no project aggregate — see
@@ -206,7 +206,7 @@ jobs:
           echo "pinning e2e fallback model: $MODEL_LABEL"
           echo "e2e model roster: ${ROSTER:-<empty>}"
           echo "E2E_MODEL_ROSTER=$ROSTER" >> "$GITHUB_ENV"
-          echo "E2E_MODEL_OFFSET=${{ github.run_number }}" >> "$GITHUB_ENV"
+          echo "E2E_MODEL_OFFSET=$(( ${{ github.run_number }} + ${{ github.run_attempt }} - 1 ))" >> "$GITHUB_ENV"
       - name: Build (release)
         if: steps.key.outputs.has_key == 'true'
         run: cargo build --release --verbose

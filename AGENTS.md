@@ -163,7 +163,7 @@ must identify the software that was installed. The first versioned delivery was
    - `cargo build --release` must have been run first
    - In CI, `E2E_MODEL_ROSTER` (comma-separated `gemini-*-flash-low` and
      `gemini-*-flash-lite` slugs, whichever agy lists) and
-     `E2E_MODEL_OFFSET` (`github.run_number`) rotate model-issuing tests via
+     `E2E_MODEL_OFFSET` (`github.run_number + github.run_attempt - 1`) rotate model-issuing tests via
      `session/set_model`: the run offset spreads the first test's model across
      runs, later tests in a run start on the last model that answered, and a
      failed turn advances to the next entry before each retry. This mitigates the observed daily per-model quota and

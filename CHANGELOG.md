@@ -12,6 +12,10 @@ versioned delivery as `0.2.0`; everything under that heading shipped together.
 
 ### Maintenance
 
+- README badges (CI, license, Rust MSRV, ACP), icon at `docs/assets/icon.jpg`, contents table of contents, and Related section. (PR #28)
+- Root MIT `LICENSE`. (PR #28)
+- README: `--permission-prompts` is macOS/Linux only; on Windows omit the flag (Permission Prompts note documents stderr when it is passed anyway). (PR #28)
+- E2E `E2E_MODEL_OFFSET` adds `github.run_attempt` so re-runs do not reuse the same starting roster slot as the first attempt. (PR #28)
 - A newer push to a PR cancels its older e2e run, even one still waiting on approval. (PR #27)
 - e2e failed turns try every roster model 15s apart, then sweep the roster again after 60s. (PR #27)
 - e2e turns stop retrying after 25 min. (PR #27)
