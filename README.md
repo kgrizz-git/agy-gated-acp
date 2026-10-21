@@ -70,7 +70,7 @@ There are no published release binaries yet; build from source (see [CHANGELOG.m
 
 ## Use with Zed
 
-Add `agy-gated-acp` as a custom agent server in your Zed settings (`~/.config/zed/settings.json`). The examples below include `--permission-prompts`, which requires **macOS or Linux**. On Windows the adapter logs that permission prompts are unavailable and continues without the bridge — omit that flag from `args` (see [Permission Prompts](#permission-prompts)).
+Add `agy-gated-acp` as a custom agent server in your Zed settings (`~/.config/zed/settings.json`). The examples below include `--permission-prompts`, which requires **macOS or Linux**; on Windows omit that flag from `args` (see [Permission Prompts](#permission-prompts)).
 
 ```json
 {
